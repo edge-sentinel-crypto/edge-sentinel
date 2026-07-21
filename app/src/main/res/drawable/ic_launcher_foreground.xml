@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Shield body -->
+    <path
+        android:fillColor="#10B981"
+        android:pathData="M54,20L26,32v20c0,18.8 11.9,36.4 28,40.6 16.1,-4.2 28,-21.8 28,-40.6V32L54,20z" />
+    <!-- Shield inner (dark cutout) -->
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M54,25L31,35.3v15.7c0,15.8 9.8,30.6 23,34.2 13.2,-3.6 23,-18.4 23,-34.2V35.3L54,25z" />
+    <!-- Signal wave 1 (innermost) -->
+    <path
+        android:fillColor="#10B981"
+        android:strokeWidth="0"
+        android:pathData="M54,62 A8,8 0 0,1 54,46 A8,8 0 0,1 54,62z" />
+    <!-- Signal wave 2 -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#10B981"
+        android:strokeWidth="2.5"
+        android:pathData="M42,54 A14,14 0 0,1 54,40" />
+    <!-- Signal wave 3 -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#10B981"
+        android:strokeWidth="2.5"
+        android:pathData="M38,54 A20,20 0 0,1 54,34" />
+    <!-- Signal wave 4 (outermost) -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#10B981"
+        android:strokeWidth="2.5"
+        android:pathData="M34,54 A26,26 0 0,1 54,28" />
+</vector>

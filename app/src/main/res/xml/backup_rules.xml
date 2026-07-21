@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ Legacy backup rules (pre-Android 12).
+  ~ Exclude the Room database AND app preferences from auto-backup so that
+  ~ sensitive threat history and settings never sync off-device.
+  -->
+<full-backup-content>
+    <exclude domain="database" path="edge_sentinel.db" />
+    <exclude domain="database" path="edge_sentinel.db-wal" />
+    <exclude domain="database" path="edge_sentinel.db-shm" />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="datastore" />
+</full-backup-content>

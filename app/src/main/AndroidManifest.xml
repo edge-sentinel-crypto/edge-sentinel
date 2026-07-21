@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ~ Edge Sentinel — Cellular Threat Detection for Android
+  ~ Copyright (C) 2024-2026 BP22 Intel. All Rights Reserved.
+  ~ Proprietary and source-available. See LICENSE.
+  -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Location permissions for cell tower identification -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Phone state for telephony info -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <!-- Network state -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Internet: ONLY used for DNS/TLS/captive-portal integrity checks.
+         These checks connect to well-known public resolvers (1.1.1.1, 8.8.8.8, 9.9.9.9)
+         and HTTPS endpoints (Google, Cloudflare) to validate DNS responses and TLS
+         certificate chains. NO user data, device identifiers, or telemetry is ever
+         transmitted. See detection/network/ for implementation details. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Notifications for threat alerts -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Battery optimization exemption for continuous monitoring -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- Background monitoring service -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <!-- Edge Sentinel does NOT auto-start on boot and declares no boot receiver.
+         androidx.work (WorkManager) injects RECEIVE_BOOT_COMPLETED via manifest
+         merge for its AlarmManager-based rescheduling path. On minSdk 26 this app
+         uses the JobScheduler path, which persists periodic work across reboot
+         without this permission, so we strip the library-injected permission to
+         avoid an unused/orphan sensitive permission. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" tools:node="remove" />
+
+    <!-- BLE: mesh networking and tracker detection (location-associated scanning) -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+
+    <!-- WiFi threat detection + mesh networking: Wi-Fi Direct -->
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
+
+    <application
+        android:name=".EdgeSentinelApp"
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.EdgeSentinel">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/Theme.EdgeSentinel.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="edgesentinel" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.MonitoringService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse" />
+
+        <!-- MeshService removed — BLE discovery runs directly from ViewModel now -->
+
+        <receiver
+            android:name=".widget.ThreatStatusWidgetReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/threat_status_widget_info" />
+        </receiver>
+
+        <!-- FileProvider for sharing exported files -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_provider_paths" />
+        </provider>
+
+        <!-- Disable default WorkManager initialization (we use HiltWorkerFactory) -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
+    </application>
+
+</manifest>
