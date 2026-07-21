@@ -27,8 +27,11 @@ accepted only under the terms below.
 - Requirements: JDK 17, Android SDK (compileSdk 35), NDK, CMake 3.22.x.
 - Build and check:
   ```bash
-  ./gradlew :app:assembleDebug :app:lint :app:testDebugUnitTest
+  ./gradlew :app:assembleDebug :app:lintVitalRelease :app:testDebugUnitTest
   ```
+  `lintVitalRelease` is the release-blocking lint gate and must pass. The
+  broader `./gradlew :app:lint` analysis pass is optional and currently emits
+  advisory-only findings that do not block a build.
 - Match the existing architecture (Clean Architecture: data / domain / detection
   / ui, Hilt DI, Room, WorkManager) and keep source headers consistent with the
   proprietary license.

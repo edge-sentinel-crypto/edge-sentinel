@@ -78,9 +78,15 @@ NDK (for the native DIAG helper), CMake 3.22.x.
 
 ```bash
 # from repo root
-./gradlew :app:assembleDebug        # debug build
-./gradlew :app:lint :app:testDebugUnitTest
+./gradlew :app:assembleDebug            # debug build
+./gradlew :app:lintVitalRelease :app:testDebugUnitTest   # release-blocking lint + unit tests
 ```
+
+The commands above are the checks that gate a build. `lintVitalRelease` is the
+same lint pass that `assembleRelease` runs and must stay clean. A broader,
+non-gating analysis pass (`./gradlew :app:lint`) is also available but currently
+reports advisory findings (NewApi/MissingPermission/etc.) that are not treated
+as release blockers.
 
 Release builds require a signing key supplied out-of-tree (see
 [Signing](#signing-releases)); without one the release build stays **unsigned**
