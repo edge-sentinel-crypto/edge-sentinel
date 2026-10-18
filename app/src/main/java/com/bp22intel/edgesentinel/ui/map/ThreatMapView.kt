@@ -45,28 +45,10 @@ import com.bp22intel.edgesentinel.ui.theme.StatusSuspicious
 import com.bp22intel.edgesentinel.ui.theme.Surface
 import com.bp22intel.edgesentinel.ui.theme.TextSecondary
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
-
-/**
- * CartoDB Dark Matter tile source for dark-themed map display.
- */
-private val CARTO_DARK_MATTER: OnlineTileSourceBase = XYTileSource(
-    "CartoDB Dark Matter",
-    0,       // min zoom
-    19,      // max zoom
-    256,     // tile size px
-    ".png",
-    arrayOf(
-        "https://a.basemaps.cartocdn.com/dark_all/",
-        "https://b.basemaps.cartocdn.com/dark_all/",
-        "https://c.basemaps.cartocdn.com/dark_all/"
-    )
-)
 
 /**
  * Creates a colored circle bitmap with a category letter for use as a map marker icon.
@@ -149,13 +131,13 @@ fun ThreatMapView(
             context,
             context.getSharedPreferences("osmdroid", android.content.Context.MODE_PRIVATE)
         )
-        Configuration.getInstance().userAgentValue = "EdgeSentinel/2.0"
+        Configuration.getInstance().userAgentValue = EDGE_SENTINEL_USER_AGENT
     }
 
     // Remember the MapView so we can update it
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(CARTO_DARK_MATTER)
+            applyEdgeSentinelMapStyle()
             setMultiTouchControls(true)
             setBuiltInZoomControls(false)
             // Dark background behind tiles

@@ -52,6 +52,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.bp22intel.edgesentinel.ui.map.EDGE_SENTINEL_USER_AGENT
+import com.bp22intel.edgesentinel.ui.map.applyEdgeSentinelMapStyle
 import com.bp22intel.edgesentinel.ui.theme.AccentBlue
 import com.bp22intel.edgesentinel.ui.theme.StatusClear
 import com.bp22intel.edgesentinel.ui.theme.StatusSuspicious
@@ -59,7 +61,6 @@ import com.bp22intel.edgesentinel.ui.theme.Surface
 import com.bp22intel.edgesentinel.ui.theme.TextPrimary
 import com.bp22intel.edgesentinel.ui.theme.TextSecondary
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -95,21 +96,9 @@ fun AlertLocationMap(
 ) {
     val context = LocalContext.current
 
-    val cartoDark = remember {
-        XYTileSource(
-            "CartoDB Dark Matter",
-            0, 19, 256, ".png",
-            arrayOf(
-                "https://a.basemaps.cartocdn.com/dark_all/",
-                "https://b.basemaps.cartocdn.com/dark_all/",
-                "https://c.basemaps.cartocdn.com/dark_all/"
-            )
-        )
-    }
-
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(cartoDark)
+            applyEdgeSentinelMapStyle()
             setMultiTouchControls(true)
             setBuiltInZoomControls(false)
             setBackgroundColor(0xFF1a1a2e.toInt())
@@ -141,7 +130,7 @@ fun AlertLocationMap(
             context,
             context.getSharedPreferences("osmdroid", android.content.Context.MODE_PRIVATE)
         )
-        Configuration.getInstance().userAgentValue = "EdgeSentinel/2.0"
+        Configuration.getInstance().userAgentValue = EDGE_SENTINEL_USER_AGENT
     }
 
     // Initialize map overlays once

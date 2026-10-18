@@ -69,6 +69,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.app.ActivityCompat
 import com.bp22intel.edgesentinel.data.local.entity.KnownTowerEntity
 import com.bp22intel.edgesentinel.domain.model.CellTower
+import com.bp22intel.edgesentinel.ui.map.EDGE_SENTINEL_USER_AGENT
+import com.bp22intel.edgesentinel.ui.map.applyEdgeSentinelMapStyle
 import com.bp22intel.edgesentinel.ui.theme.AccentBlue
 import com.bp22intel.edgesentinel.ui.theme.BackgroundPrimary
 import com.bp22intel.edgesentinel.ui.theme.StatusClear
@@ -77,25 +79,11 @@ import com.bp22intel.edgesentinel.ui.theme.Surface
 import com.bp22intel.edgesentinel.ui.theme.TextPrimary
 import com.bp22intel.edgesentinel.ui.theme.TextSecondary
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
-
-/**
- * CartoDB Dark Matter tile source — matches the existing ThreatMapView style.
- */
-private val CARTO_DARK_MATTER = XYTileSource(
-    "CartoDB Dark Matter",
-    0, 19, 256, ".png",
-    arrayOf(
-        "https://a.basemaps.cartocdn.com/dark_all/",
-        "https://b.basemaps.cartocdn.com/dark_all/",
-        "https://c.basemaps.cartocdn.com/dark_all/"
-    )
-)
 
 /**
  * Data class holding all information needed to display the tower location sheet.
@@ -388,12 +376,12 @@ private fun TowerMapView(
             context,
             context.getSharedPreferences("osmdroid", Context.MODE_PRIVATE)
         )
-        Configuration.getInstance().userAgentValue = "EdgeSentinel/2.0"
+        Configuration.getInstance().userAgentValue = EDGE_SENTINEL_USER_AGENT
     }
 
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(CARTO_DARK_MATTER)
+            applyEdgeSentinelMapStyle()
             setMultiTouchControls(true)
             setBuiltInZoomControls(false)
             setBackgroundColor(0xFF1a1a2e.toInt())

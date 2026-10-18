@@ -112,24 +112,15 @@ import com.bp22intel.edgesentinel.ui.theme.Surface
 import com.bp22intel.edgesentinel.ui.theme.SurfaceVariant
 import com.bp22intel.edgesentinel.ui.theme.TextPrimary
 import com.bp22intel.edgesentinel.ui.theme.TextSecondary
+import com.bp22intel.edgesentinel.ui.map.EDGE_SENTINEL_USER_AGENT
+import com.bp22intel.edgesentinel.ui.map.applyEdgeSentinelMapStyle
 import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.XYTileSource
 import org.osmdroid.util.BoundingBox
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polygon
 import org.osmdroid.views.overlay.Polyline
-
-private val CARTO_DARK_MATTER = XYTileSource(
-    "CartoDB Dark Matter",
-    0, 19, 256, ".png",
-    arrayOf(
-        "https://a.basemaps.cartocdn.com/dark_all/",
-        "https://b.basemaps.cartocdn.com/dark_all/",
-        "https://c.basemaps.cartocdn.com/dark_all/"
-    )
-)
 
 // ── Main Screen ─────────────────────────────────────────────────────────
 
@@ -387,12 +378,12 @@ private fun SweepMapView(
             context,
             context.getSharedPreferences("osmdroid", android.content.Context.MODE_PRIVATE)
         )
-        Configuration.getInstance().userAgentValue = "EdgeSentinel/2.0"
+        Configuration.getInstance().userAgentValue = EDGE_SENTINEL_USER_AGENT
     }
 
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(CARTO_DARK_MATTER)
+            applyEdgeSentinelMapStyle()
             setMultiTouchControls(true)
             setBuiltInZoomControls(false)
             setBackgroundColor(0xFF0D1117.toInt())
