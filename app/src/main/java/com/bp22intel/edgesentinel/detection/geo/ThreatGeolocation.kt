@@ -410,7 +410,7 @@ class ThreatGeolocation @Inject constructor(
             meshObservations.add(observation)
             // Cap at 100 observations
             while (meshObservations.size > 100) {
-                meshObservations.removeFirst()
+                meshObservations.removeAt(0)
             }
         }
     }
@@ -643,11 +643,25 @@ class ThreatGeolocation @Inject constructor(
 
             val distanceM = ta * TA_STEP_METERS
 
+            val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                identity.mccString?.toIntOrNull() ?: 0
+            } else {
+                @Suppress("DEPRECATION")
+                val v = identity.mcc
+                if (v == Int.MAX_VALUE) 0 else v
+            }
+            val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                identity.mncString?.toIntOrNull() ?: 0
+            } else {
+                @Suppress("DEPRECATION")
+                val v = identity.mnc
+                if (v == Int.MAX_VALUE) 0 else v
+            }
             TimingAdvanceReading(
                 cid = identity.ci,
                 tac = identity.tac,
-                mcc = identity.mccString?.toIntOrNull() ?: 0,
-                mnc = identity.mncString?.toIntOrNull() ?: 0,
+                mcc = mcc,
+                mnc = mnc,
                 timingAdvance = ta,
                 distanceM = distanceM,
                 rsrp = signal.dbm

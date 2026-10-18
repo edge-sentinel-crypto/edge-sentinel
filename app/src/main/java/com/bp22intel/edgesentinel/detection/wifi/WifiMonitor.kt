@@ -10,6 +10,7 @@
 
 package com.bp22intel.edgesentinel.detection.wifi
 
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -159,7 +160,12 @@ class WifiMonitor @Inject constructor(
         _isMonitoring.value = true
 
         val processScanResults: () -> Unit = {
-            val results = wifiManager.scanResults.orEmpty()
+            @SuppressLint("MissingPermission") // Location permission checked at runtime; handled with SecurityException fallback
+            val results = try {
+                wifiManager.scanResults.orEmpty()
+            } catch (_: SecurityException) {
+                emptyList()
+            }
             val snapshot = toSnapshot(results)
             pushHistory(snapshot)
             _latestScan.value = snapshot

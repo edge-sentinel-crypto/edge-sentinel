@@ -16,13 +16,18 @@ import android.content.SharedPreferences
 import androidx.core.content.FileProvider
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bp22intel.edgesentinel.data.local.EdgeSentinelDatabase
 import com.bp22intel.edgesentinel.domain.model.DetectionSensitivity
+import com.bp22intel.edgesentinel.service.MonitoringService
+import com.bp22intel.edgesentinel.service.ScanWorker
+import com.bp22intel.edgesentinel.travel.DataWipeManager
 import com.bp22intel.edgesentinel.travel.TravelAdvisor
+import com.bp22intel.edgesentinel.travel.TravelExporter
 import com.bp22intel.edgesentinel.travel.TravelMode
 import com.bp22intel.edgesentinel.travel.TravelModeState
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -52,6 +57,8 @@ class TravelModeViewModel @Inject constructor(
         private const val PREFS_NAME = "travel_checklist"
         private const val KEY_CHECKED_ITEMS = "checked_items"
         private val KEY_DETECTION_SENSITIVITY = stringPreferencesKey("detection_sensitivity")
+        private val KEY_MONITORING_ENABLED = booleanPreferencesKey("monitoring_enabled")
+        private const val STOP_TIMEOUT_MS = 5_000L
     }
 
     private val travelMode = TravelMode(context)
@@ -100,103 +107,72 @@ class TravelModeViewModel @Inject constructor(
         }
     }
 
-    fun exportData(@Suppress("UNUSED_PARAMETER") passphrase: String) {
+    private val _exportError = MutableStateFlow<String?>(null)
+    /** Export error shown in the UI; null when there is none. */
+    val exportError: StateFlow<String?> = _exportError.asStateFlow()
+
+    fun clearExportError() {
+        _exportError.value = null
+    }
+
+    fun exportData(passphrase: String) {
+        // F5: never write plaintext. A blank passphrase is rejected.
+        if (passphrase.isBlank()) {
+            _exportError.value = "Export cancelled: a passphrase is required. " +
+                "Travel data is only exported encrypted."
+            return
+        }
         viewModelScope.launch {
             try {
-                val state = travelState.value
-                val alerts = database.alertDao().getActiveSince(0L)
-                val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", Locale.US)
+                val exporter = TravelExporter(context)
+                val uri = withContext(Dispatchers.IO) { exporter.exportEncrypted(passphrase) }
 
-                val report = buildString {
-                    appendLine("═══════════════════════════════════════════")
-                    appendLine("  EDGE SENTINEL — TRAVEL SECURITY REPORT")
-                    appendLine("═══════════════════════════════════════════")
-                    appendLine()
-                    appendLine("Generated: ${dateFormat.format(Date())}")
-                    appendLine("Device: ${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}")
-                    appendLine("Android: ${android.os.Build.VERSION.RELEASE}")
-                    appendLine()
-
-                    if (state.currentCountryName != null) {
-                        appendLine("── Travel Session ──")
-                        appendLine("Country: ${state.currentCountryName} (${state.currentCountryCode})")
-                        if (state.entryTimestamp > 0) {
-                            appendLine("Entry: ${dateFormat.format(Date(state.entryTimestamp))}")
-                        }
-                        state.threatProfile?.let { profile ->
-                            appendLine("Risk Level: ${profile.riskLevel}/5")
-                            appendLine("Primary Threats:")
-                            profile.primaryThreats.forEach { appendLine("  • $it") }
-                        }
-                        appendLine()
+                if (uri == null) {
+                    _exportError.value = "Export failed: the encrypted file could not be created."
+                } else {
+                    val shareIntent = exporter.createShareIntent(uri, encrypted = true).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-
-                    appendLine("── Alerts (${alerts.size}) ──")
-                    if (alerts.isEmpty()) {
-                        appendLine("  No alerts recorded.")
-                    } else {
-                        alerts.forEach { alert ->
-                            appendLine("  [${dateFormat.format(Date(alert.timestamp))}] ${alert.severity}: ${alert.threatType}")
-                            appendLine("    ${alert.summary}")
-                        }
-                    }
-                    appendLine()
-
-                    appendLine("── Checklist Status ──")
-                    val checked = _checkedItems.value
-                    TravelAdvisor.getPreDepartureChecklist().forEach { item ->
-                        val mark = if (item.id in checked) "✓" else "✗"
-                        appendLine("  [$mark] ${item.text}")
-                    }
-                    TravelAdvisor.getPostDepartureChecklist().forEach { item ->
-                        val mark = if (item.id in checked) "✓" else "✗"
-                        appendLine("  [$mark] ${item.text}")
-                    }
-                    appendLine()
-                    appendLine("═══════════════════════════════════════════")
-                    appendLine("  END OF REPORT")
-                    appendLine("═══════════════════════════════════════════")
+                    context.startActivity(Intent.createChooser(shareIntent, "Export Travel Report").apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
                 }
-
-                val exportDir = File(context.cacheDir, "travel_exports")
-                exportDir.mkdirs()
-                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-                val exportFile = File(exportDir, "edge_sentinel_travel_$timestamp.txt")
-                exportFile.writeText(report)
-
-                val uri = FileProvider.getUriForFile(
-                    context,
-                    "${context.packageName}.fileprovider",
-                    exportFile
-                )
-
-                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_STREAM, uri)
-                    putExtra(Intent.EXTRA_SUBJECT, "Edge Sentinel Travel Report — $timestamp")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(Intent.createChooser(shareIntent, "Export Travel Report").apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                })
-            } catch (_: Exception) {
-                // Export failure handled silently
+            } catch (e: Exception) {
+                _exportError.value = "Export failed: ${e.message ?: e.javaClass.simpleName}"
             }
+        }
+    }
+
+    private val _wipeError = MutableStateFlow<String?>(null)
+    /** Wipe error shown in the UI; null when there is none. */
+    val wipeError: StateFlow<String?> = _wipeError.asStateFlow()
+
+    /** Set when a panic wipe failed; the process restarts after the user acknowledges. */
+    @Volatile private var restartAfterWipeErrorAck = false
+
+    /** Called when the user dismisses the wipe-error dialog. */
+    fun acknowledgeWipeError() {
+        _wipeError.value = null
+        if (restartAfterWipeErrorAck) {
+            restartAfterWipeErrorAck = false
+            restartProcess()
         }
     }
 
     fun wipeTravelData() {
         viewModelScope.launch {
             val entryTimestamp = travelState.value.entryTimestamp
-            if (entryTimestamp > 0) {
-                val now = System.currentTimeMillis()
-                // Clear ONLY travel-period data: alerts and estimated tower
-                // positions observed during the trip. Learned baselines and other
-                // long-lived detection learning are deliberately preserved so that
-                // "Clear Travel Data" does not reset the user's home environment model.
-                database.alertDao().deleteBetween(entryTimestamp, now)
-                database.estimatedTowerPositionDao().deleteBetween(entryTimestamp, now)
+            // NF1: DataWipeManager owns travel-data deletion (alerts, scans and
+            // cells since the travel-mode entry time). The ViewModel does not
+            // delete tables itself.
+            val result = withContext(Dispatchers.IO) {
+                DataWipeManager(context).wipeTravelData(entryTimestamp)
+            }
+            if (!result.success) {
+                // NF4: report the failure; keep travel mode so the user can retry.
+                _wipeError.value = "Travel data wipe failed. Some data may remain.\n" +
+                    result.errors.joinToString("\n")
+                return@launch
             }
             // Clear travel checklist
             _checkedItems.value = emptySet()
@@ -208,29 +184,53 @@ class TravelModeViewModel @Inject constructor(
 
     fun panicWipe() {
         viewModelScope.launch {
-            // Nuclear option — erase ALL app data via Room's clearAllTables
-            withContext(Dispatchers.IO) {
-                database.clearAllTables()
+            val result = withContext(Dispatchers.IO) {
+                // N4: disable monitoring auto-start BEFORE anything else, so
+                // neither the app nor the system restarts monitoring after the wipe.
+                MonitoringService.setAutoStartDisabled(context, true)
+                try { dataStore.edit { it[KEY_MONITORING_ENABLED] = false } } catch (_: Exception) {}
+
+                // N3: stop background scanning and WAIT until it has stopped,
+                // so nothing writes to Room during or after the wipe.
+                try { MonitoringService.stopAndAwait(context, STOP_TIMEOUT_MS) } catch (_: Exception) {}
+                try { ScanWorker.cancelAndAwait(context, STOP_TIMEOUT_MS) } catch (_: Exception) {}
+
+                // F6: clear the live DataStore singletons BEFORE files are deleted,
+                // so they cannot rewrite old values from memory afterwards.
+                try { travelMode.confirmExit() } catch (_: Exception) {}  // travel_mode store
+                _checkedItems.value = emptySet()
+
+                val closeError = try {
+                    database.close()
+                    null
+                } catch (e: Exception) {
+                    "Failed to close database: ${e.message}"
+                }
+                val wipe = DataWipeManager(context).panicWipe(dataStores = listOf(dataStore))
+                // The settings store was cleared; keep auto-start disabled.
+                MonitoringService.setAutoStartDisabled(context, true)
+                if (closeError != null) wipe.copy(success = false, errors = wipe.errors + closeError) else wipe
             }
 
-            // Clear all preferences
-            dataStore.edit { it.clear() }
-            checklistPrefs.edit().clear().apply()
-            context.getSharedPreferences("trusted_mitm_services", Context.MODE_PRIVATE)
-                .edit().clear().apply()
-            context.getSharedPreferences("network_integrity_history", Context.MODE_PRIVATE)
-                .edit().clear().apply()
-
-            // Clear travel mode state
-            travelMode.confirmExit()
-
-            // Clear checklist
-            _checkedItems.value = emptySet()
-
-            // Clear cached files
-            withContext(Dispatchers.IO) {
-                context.cacheDir.deleteRecursively()
+            if (result.success) {
+                // F6: Room is closed and its files are confirmed gone. Restart the
+                // process so no code touches the closed database.
+                restartProcess()
+            } else {
+                // NF4: show the failure. Restart only after the user acknowledges it.
+                restartAfterWipeErrorAck = true
+                _wipeError.value = "Panic wipe did not complete. Some data may remain.\n" +
+                    result.errors.joinToString("\n")
             }
         }
+    }
+
+    private fun restartProcess() {
+        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
+        val component = launch?.component
+        if (component != null) {
+            context.startActivity(Intent.makeRestartActivityTask(component))
+        }
+        Runtime.getRuntime().exit(0)
     }
 }

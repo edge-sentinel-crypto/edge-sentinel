@@ -12,6 +12,8 @@ package com.bp22intel.edgesentinel.travel
 
 import android.content.Context
 import android.net.Uri
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.preferencesDataStore
 import java.io.File
@@ -36,31 +38,45 @@ class DataWipeManager(private val context: Context) {
         private const val OVERWRITE_PASSES = 3
     }
 
-    suspend fun wipeTravelData(): WipeResult {
-        return performWipe(WipeScope.TRAVEL_DATA)
+    /**
+     * Clears travel-period rows. [entryTimestamp] is the travel-mode entry time;
+     * when it is not positive, no database rows are deleted.
+     */
+    suspend fun wipeTravelData(entryTimestamp: Long): WipeResult {
+        return performWipe(WipeScope.TRAVEL_DATA, entryTimestamp = entryTimestamp)
     }
 
-    suspend fun exportThenWipe(passphrase: String): Pair<Uri?, WipeResult> {
+    suspend fun exportThenWipe(passphrase: String, entryTimestamp: Long): Pair<Uri?, WipeResult> {
         val exporter = TravelExporter(context)
         val exportUri = exporter.exportEncrypted(passphrase)
-        val wipeResult = performWipe(WipeScope.TRAVEL_DATA)
+        val wipeResult = performWipe(WipeScope.TRAVEL_DATA, entryTimestamp = entryTimestamp)
         return Pair(exportUri, wipeResult)
     }
 
-    suspend fun panicWipe(): WipeResult {
-        return performWipe(WipeScope.ALL_DATA)
+    /**
+     * Wipes all app data. [dataStores] are the live (injected) DataStore
+     * instances; they are cleared through their own API BEFORE any file is
+     * deleted, so the in-memory singletons cannot rewrite old values later.
+     * The caller must close Room first and restart the process afterwards.
+     */
+    suspend fun panicWipe(dataStores: List<DataStore<Preferences>> = emptyList()): WipeResult {
+        return performWipe(WipeScope.ALL_DATA, dataStores = dataStores)
     }
 
-    private suspend fun performWipe(scope: WipeScope): WipeResult {
+    private suspend fun performWipe(
+        scope: WipeScope,
+        entryTimestamp: Long = 0L,
+        dataStores: List<DataStore<Preferences>> = emptyList()
+    ): WipeResult {
         val errors = mutableListOf<String>()
         var filesDeleted = 0
 
         try {
-            // Clear DataStore preferences
-            clearDataStores(scope)
+            // 1. Clear DataStores through their live instances (before file delete)
+            clearDataStores(scope, dataStores, errors)
 
-            // Clear database tables
-            filesDeleted += clearDatabaseTables(scope)
+            // 2. Clear database tables
+            filesDeleted += clearDatabaseTables(scope, entryTimestamp, errors)
 
             // Securely delete files in internal storage
             val travelDir = File(context.filesDir, "travel")
@@ -69,8 +85,16 @@ class DataWipeManager(private val context: Context) {
             }
 
             if (scope == WipeScope.ALL_DATA) {
-                // Delete all app databases
-                for (dbName in context.databaseList()) {
+                // Clear explicit SharedPreferences known to hold sensitive credentials
+                listOf("edge_sentinel", "travel_checklist", "trusted_mitm_services", "network_integrity_history").forEach { name ->
+                    try {
+                        context.getSharedPreferences(name, Context.MODE_PRIVATE).edit().clear().commit()
+                    } catch (_: Exception) {}
+                }
+
+                // Delete all app databases and their directory (-wal, -shm files)
+                val dbNames = (context.databaseList().toList() + listOf("edge_sentinel.db", "edge_sentinel_database")).distinct()
+                for (dbName in dbNames) {
                     try {
                         context.deleteDatabase(dbName)
                         filesDeleted++
@@ -78,8 +102,21 @@ class DataWipeManager(private val context: Context) {
                         errors.add("Failed to delete database $dbName: ${e.message}")
                     }
                 }
+                val dbDir = context.getDatabasePath("edge_sentinel.db").parentFile
+                if (dbDir != null && dbDir.exists()) {
+                    filesDeleted += secureDeleteDirectory(dbDir)
+                }
 
-                // Clear all shared preferences
+                // N3: confirm that no database file survived (main, -wal, -shm, -journal).
+                val mainDb = context.getDatabasePath("edge_sentinel.db")
+                val leftovers = listOf("", "-wal", "-shm", "-journal")
+                    .map { File(mainDb.path + it) }
+                    .filter { it.exists() }
+                if (leftovers.isNotEmpty()) {
+                    errors.add("Database files still exist after wipe: " + leftovers.joinToString { it.name })
+                }
+
+                // Clear all shared preferences files
                 val prefsDir = File(context.applicationInfo.dataDir, "shared_prefs")
                 if (prefsDir.exists()) {
                     filesDeleted += secureDeleteDirectory(prefsDir)
@@ -91,14 +128,22 @@ class DataWipeManager(private val context: Context) {
                     filesDeleted += secureDeleteDirectory(dataStoreDir)
                 }
 
+                // Clear all files in filesDir (offline towers, exports, calibration, etc.)
+                context.filesDir.listFiles()?.forEach { file ->
+                    if (file.isDirectory) filesDeleted += secureDeleteDirectory(file)
+                    else if (secureDeleteFile(file)) filesDeleted++
+                }
+
                 // Clear cache
                 context.cacheDir.listFiles()?.forEach { file ->
-                    if (secureDeleteFile(file)) filesDeleted++
+                    if (file.isDirectory) filesDeleted += secureDeleteDirectory(file)
+                    else if (secureDeleteFile(file)) filesDeleted++
                 }
 
                 // Clear external cache if available
                 context.externalCacheDir?.listFiles()?.forEach { file ->
-                    if (secureDeleteFile(file)) filesDeleted++
+                    if (file.isDirectory) filesDeleted += secureDeleteDirectory(file)
+                    else if (secureDeleteFile(file)) filesDeleted++
                 }
             }
         } catch (e: Exception) {
@@ -112,35 +157,58 @@ class DataWipeManager(private val context: Context) {
         )
     }
 
-    private suspend fun clearDataStores(scope: WipeScope) {
-        context.travelWipeDataStore.edit { it.clear() }
+    private suspend fun clearDataStores(
+        scope: WipeScope,
+        dataStores: List<DataStore<Preferences>>,
+        errors: MutableList<String>
+    ) {
+        try {
+            context.travelWipeDataStore.edit { it.clear() }
+        } catch (e: Exception) {
+            errors.add("Failed to clear travel_wipe DataStore: ${e.message}")
+        }
         if (scope == WipeScope.ALL_DATA) {
-            // Clear all known DataStore instances
-            val dataStoreDir = File(context.filesDir, "datastore")
-            if (dataStoreDir.exists()) {
-                dataStoreDir.listFiles()?.forEach { file ->
-                    secureDeleteFile(file)
+            for (store in dataStores) {
+                try {
+                    store.edit { it.clear() }
+                } catch (e: Exception) {
+                    errors.add("Failed to clear DataStore: ${e.message}")
                 }
             }
+            // Files under filesDir/datastore are deleted later in performWipe,
+            // after every live instance has been cleared.
         }
     }
 
-    private fun clearDatabaseTables(scope: WipeScope): Int {
+    private fun clearDatabaseTables(
+        scope: WipeScope,
+        entryTimestamp: Long,
+        errors: MutableList<String>
+    ): Int {
         var cleared = 0
         try {
-            val dbFile = context.getDatabasePath("edge_sentinel_database")
-            if (dbFile.exists()) {
+            val candidates = listOf(
+                context.getDatabasePath("edge_sentinel.db"),
+                context.getDatabasePath("edge_sentinel_database")
+            )
+            val dbFile = candidates.firstOrNull { it.exists() }
+            if (dbFile != null && dbFile.exists()) {
                 val db = android.database.sqlite.SQLiteDatabase.openDatabase(
                     dbFile.absolutePath, null,
                     android.database.sqlite.SQLiteDatabase.OPEN_READWRITE
                 )
                 db.use {
                     if (scope == WipeScope.TRAVEL_DATA) {
-                        // Only clear travel-period data
-                        it.execSQL("DELETE FROM alerts WHERE timestamp > (SELECT COALESCE(MIN(entry_timestamp), 0) FROM travel_sessions)")
-                        it.execSQL("DELETE FROM scans WHERE timestamp > (SELECT COALESCE(MIN(entry_timestamp), 0) FROM travel_sessions)")
-                        it.execSQL("DELETE FROM cell_towers WHERE last_seen > (SELECT COALESCE(MIN(entry_timestamp), 0) FROM travel_sessions)")
-                        cleared += 3
+                        // Only clear travel-period data. Real table names are
+                        // `alerts`, `scans`, `cells` (there is no travel_sessions
+                        // table; the entry time comes from the travel_mode DataStore).
+                        if (entryTimestamp > 0) {
+                            val args = arrayOf<Any>(entryTimestamp)
+                            it.execSQL("DELETE FROM alerts WHERE timestamp >= ?", args)
+                            it.execSQL("DELETE FROM scans WHERE timestamp >= ?", args)
+                            it.execSQL("DELETE FROM cells WHERE first_seen >= ?", args)
+                            cleared += 3
+                        }
                     } else {
                         // Clear everything
                         val cursor = it.rawQuery(
@@ -158,8 +226,9 @@ class DataWipeManager(private val context: Context) {
                     it.execSQL("VACUUM")
                 }
             }
-        } catch (_: Exception) {
-            // Database may not exist yet or have different schema
+        } catch (e: Exception) {
+            // NF4: a failed table wipe is a failed wipe. Report it; never swallow it.
+            errors.add("Failed to clear database tables: ${e.message ?: e.javaClass.simpleName}")
         }
         return cleared
     }

@@ -23,6 +23,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.bp22intel.edgesentinel.domain.model.DetectionSensitivity
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -35,7 +36,8 @@ import javax.inject.Inject
 
 @HiltViewModel
 class SettingsViewModel @Inject constructor(
-    private val dataStore: DataStore<Preferences>
+    private val dataStore: DataStore<Preferences>,
+    @ApplicationContext private val context: Context
 ) : ViewModel() {
 
     companion object {
@@ -98,6 +100,8 @@ class SettingsViewModel @Inject constructor(
     fun setMonitoringEnabled(enabled: Boolean) {
         viewModelScope.launch {
             dataStore.edit { prefs -> prefs[KEY_MONITORING_ENABLED] = enabled }
+            // N4: an explicit user choice in Settings controls auto-start again.
+            com.bp22intel.edgesentinel.service.MonitoringService.setAutoStartDisabled(context, !enabled)
         }
     }
 

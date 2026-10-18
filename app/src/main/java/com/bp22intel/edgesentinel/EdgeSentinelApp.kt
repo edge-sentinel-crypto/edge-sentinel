@@ -53,7 +53,10 @@ class EdgeSentinelApp : Application(), Configuration.Provider {
         NotificationChannels.createAll(this)
 
         // Enqueue periodic backup scan worker (runs only if foreground service is dead)
-        ScanWorker.enqueue(this)
+        // N4: not after a panic wipe (auto-start disabled until Settings re-enables it).
+        if (!com.bp22intel.edgesentinel.service.MonitoringService.isAutoStartDisabled(this)) {
+            ScanWorker.enqueue(this)
+        }
 
         // Auto-import bundled US tower database on first launch
         appScope.launch {

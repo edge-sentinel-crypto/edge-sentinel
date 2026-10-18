@@ -36,6 +36,8 @@ import com.bp22intel.edgesentinel.detection.wifi.WifiThreatDetector
 import com.bp22intel.edgesentinel.domain.model.Alert
 import com.bp22intel.edgesentinel.domain.model.Confidence
 import com.bp22intel.edgesentinel.domain.model.DetectionResult
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
 import com.bp22intel.edgesentinel.domain.model.ScanResult
 import com.bp22intel.edgesentinel.domain.model.ThreatLevel
 import com.bp22intel.edgesentinel.domain.repository.AlertRepository
@@ -68,6 +70,7 @@ class MonitoringService : LifecycleService() {
     @Inject lateinit var scanRepository: ScanRepository
     @Inject lateinit var sensorFusionEngine: com.bp22intel.edgesentinel.fusion.SensorFusionEngine
     @Inject lateinit var motionDetector: MotionDetector
+    @Inject lateinit var settingsDataStore: DataStore<Preferences>
 
     // WiFi detection
     @Inject lateinit var wifiMonitor: WifiMonitor
@@ -146,6 +149,41 @@ class MonitoringService : LifecycleService() {
             }
             context.startService(intent)
         }
+
+        /**
+         * N3: sends ACTION_STOP and suspends until [isRunning] is false, or until
+         * [timeoutMs] passes. Returns true when the service reported stopped.
+         * A short grace period lets the stop-time flushToDisk write finish
+         * before the caller closes the database.
+         */
+        suspend fun stopAndAwait(context: Context, timeoutMs: Long): Boolean {
+            if (_isRunning.value) {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { stop(context) }
+            }
+            val stopped = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                isRunning.first { !it }
+            } != null
+            kotlinx.coroutines.delay(STOP_GRACE_MS)
+            return stopped
+        }
+
+        private const val AUTOSTART_PREFS = "monitoring_autostart"
+        private const val KEY_AUTOSTART_DISABLED = "auto_start_disabled"
+        private const val STOP_GRACE_MS = 750L
+
+        /**
+         * N4: persistent auto-start switch. Panic wipe sets it, so neither
+         * MainActivity nor EdgeSentinelApp restarts monitoring after the wipe.
+         * Enabling monitoring in Settings clears it.
+         */
+        fun setAutoStartDisabled(context: Context, disabled: Boolean) {
+            context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_AUTOSTART_DISABLED, disabled).commit()
+        }
+
+        fun isAutoStartDisabled(context: Context): Boolean =
+            context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
+                .getBoolean(KEY_AUTOSTART_DISABLED, false)
     }
 
     override fun onCreate() {
@@ -456,14 +494,22 @@ class MonitoringService : LifecycleService() {
                 )
             }
 
-            // Run threat detection
-            val detectionResults = threatDetectionEngine.runScan(
+            // Run threat detection with the user's sensitivity, location, and motion.
+            val sensitivity = ScanThreatLevels.readSensitivity(settingsDataStore)
+            val motionKnown = motionDetector.motionState.value != MotionState.UNKNOWN
+            val outcome = threatDetectionEngine.runScanWithScore(
                 cells = currentCells,
-                history = history
+                history = history,
+                sensitivity = sensitivity,
+                latitude = userLocation?.latitude,
+                longitude = userLocation?.longitude,
+                isMoving = if (motionKnown) motionDetector.isMoving else null
             )
+            val detectionResults = outcome.results
 
-            // Determine overall threat level from detection results
-            val scanThreatLevel = determineThreatLevel(detectionResults)
+            // Overall level comes from the ThreatScorer result (0-10 scale,
+            // SUSPICIOUS/THREAT thresholds x sensitivity multiplier).
+            val scanThreatLevel = ScanThreatLevels.overallLevel(outcome.scoringResult, detectionResults, sensitivity)
             _threatLevel.value = scanThreatLevel
 
             // Save scan result
@@ -478,11 +524,7 @@ class MonitoringService : LifecycleService() {
 
             // Create alerts for suspicious or threatening results
             for (result in detectionResults) {
-                val severity = when {
-                    result.score >= 0.7 -> ThreatLevel.THREAT
-                    result.score >= 0.4 -> ThreatLevel.SUSPICIOUS
-                    else -> ThreatLevel.CLEAR
-                }
+                val severity = ScanThreatLevels.alertSeverity(result.score, sensitivity)
 
                 if (severity == ThreatLevel.SUSPICIOUS || severity == ThreatLevel.THREAT) {
                     // Build enriched detailsJson with cell tower context + motion state.
@@ -588,7 +630,7 @@ class MonitoringService : LifecycleService() {
                             sensorCategory = sensorCategory,
                             detectionType = result.threatType.name,
                             description = result.summary,
-                            score = result.score,
+                            score = (result.score / 10.0).coerceIn(0.0, 1.0),
                             timestamp = startTime
                         )
                     )
@@ -607,17 +649,6 @@ class MonitoringService : LifecycleService() {
                 durationMs = durationMs
             )
             scanRepository.insertScan(scanResult)
-        }
-    }
-
-    private fun determineThreatLevel(results: List<DetectionResult>): ThreatLevel {
-        if (results.isEmpty()) return ThreatLevel.CLEAR
-
-        val maxScore = results.maxOf { it.score }
-        return when {
-            maxScore >= 0.7 -> ThreatLevel.THREAT
-            maxScore >= 0.4 -> ThreatLevel.SUSPICIOUS
-            else -> ThreatLevel.CLEAR
         }
     }
 

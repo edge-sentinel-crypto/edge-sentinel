@@ -44,7 +44,7 @@ class MainActivity : ComponentActivity() {
         // Auto-start monitoring once permissions are granted
         val locationGranted = results[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
             results[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        if (locationGranted) {
+        if (locationGranted && !MonitoringService.isAutoStartDisabled(this)) {
             MonitoringService.start(this)
         }
     }
@@ -61,7 +61,9 @@ class MainActivity : ComponentActivity() {
         val hasLocation = ContextCompat.checkSelfPermission(
             this, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
-        if (hasLocation && !MonitoringService.isRunning.value) {
+        if (hasLocation && !MonitoringService.isRunning.value &&
+            !MonitoringService.isAutoStartDisabled(this)
+        ) {
             MonitoringService.start(this)
         }
 

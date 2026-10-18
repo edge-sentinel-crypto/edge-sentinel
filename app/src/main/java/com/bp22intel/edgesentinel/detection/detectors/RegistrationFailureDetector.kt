@@ -385,27 +385,63 @@ class RegistrationFailureDetector @Inject constructor(
                 )
             }
             cellIdentity is CellIdentityLte -> {
+                val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mccString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mcc.let { if (it == Int.MAX_VALUE) null else it }
+                }
+                val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mncString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mnc.let { if (it == Int.MAX_VALUE) null else it }
+                }
                 CellFields(
                     cid = cellIdentity.ci.let { if (it == Int.MAX_VALUE) null else it },
                     tacLac = cellIdentity.tac.let { if (it == Int.MAX_VALUE) null else it },
-                    mcc = cellIdentity.mccString?.toIntOrNull(),
-                    mnc = cellIdentity.mncString?.toIntOrNull()
+                    mcc = mcc,
+                    mnc = mnc
                 )
             }
             cellIdentity is CellIdentityWcdma -> {
+                val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mccString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mcc.let { if (it == Int.MAX_VALUE) null else it }
+                }
+                val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mncString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mnc.let { if (it == Int.MAX_VALUE) null else it }
+                }
                 CellFields(
                     cid = cellIdentity.cid.let { if (it == Int.MAX_VALUE) null else it },
                     tacLac = cellIdentity.lac.let { if (it == Int.MAX_VALUE) null else it },
-                    mcc = cellIdentity.mccString?.toIntOrNull(),
-                    mnc = cellIdentity.mncString?.toIntOrNull()
+                    mcc = mcc,
+                    mnc = mnc
                 )
             }
             cellIdentity is CellIdentityGsm -> {
+                val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mccString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mcc.let { if (it == Int.MAX_VALUE) null else it }
+                }
+                val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    cellIdentity.mncString?.toIntOrNull()
+                } else {
+                    @Suppress("DEPRECATION")
+                    cellIdentity.mnc.let { if (it == Int.MAX_VALUE) null else it }
+                }
                 CellFields(
                     cid = cellIdentity.cid.let { if (it == Int.MAX_VALUE) null else it },
                     tacLac = cellIdentity.lac.let { if (it == Int.MAX_VALUE) null else it },
-                    mcc = cellIdentity.mccString?.toIntOrNull(),
-                    mnc = cellIdentity.mncString?.toIntOrNull()
+                    mcc = mcc,
+                    mnc = mnc
                 )
             }
             else -> CellFields(null, null, null, null)

@@ -92,8 +92,12 @@ class TelephonyMonitor @Inject constructor(
             val listener = object : PhoneStateListener() {
                 @Deprecated("Deprecated in Java")
                 override fun onSignalStrengthsChanged(signalStrength: SignalStrength) {
-                    val dbm = signalStrength.cellSignalStrengths
-                        .firstOrNull()?.dbm ?: Int.MIN_VALUE
+                    val dbm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        signalStrength.cellSignalStrengths.firstOrNull()?.dbm ?: Int.MIN_VALUE
+                    } else {
+                        val asu = signalStrength.gsmSignalStrength
+                        if (asu != 99 && asu > 0) -113 + 2 * asu else Int.MIN_VALUE
+                    }
                     _currentSignalDbm.value = dbm
                     _events.tryEmit(TelephonyEvent.SignalStrengthChanged(dbm))
                 }

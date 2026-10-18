@@ -10,4 +10,5 @@
     <exclude domain="database" path="edge_sentinel.db-shm" />
     <exclude domain="sharedpref" path="." />
     <exclude domain="file" path="datastore" />
+    <exclude domain="file" path="travel_exports" />
 </full-backup-content>

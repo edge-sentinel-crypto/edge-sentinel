@@ -99,7 +99,11 @@ fun TravelModeScreen(
     onExportData: (passphrase: String) -> Unit = {},
     onWipeTravelData: () -> Unit = {},
     onPanicWipe: () -> Unit = {},
-    onChecklistItemToggle: (String, Boolean) -> Unit = { _, _ -> }
+    onChecklistItemToggle: (String, Boolean) -> Unit = { _, _ -> },
+    exportError: String? = null,
+    onDismissExportError: () -> Unit = {},
+    wipeError: String? = null,
+    onDismissWipeError: () -> Unit = {}
 ) {
     var showPanicConfirm by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -116,6 +120,42 @@ fun TravelModeScreen(
                 onPanicWipe()
             },
             onDismiss = { showPanicConfirm = false }
+        )
+    }
+
+    if (wipeError != null) {
+        AlertDialog(
+            onDismissRequest = onDismissWipeError,
+            containerColor = Surface,
+            title = {
+                Text("Wipe Failed", color = StatusThreat, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(wipeError, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissWipeError) {
+                    Text("OK", color = AccentBlue)
+                }
+            }
+        )
+    }
+
+    if (exportError != null) {
+        AlertDialog(
+            onDismissRequest = onDismissExportError,
+            containerColor = Surface,
+            title = {
+                Text("Export Failed", color = StatusThreat, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(exportError, color = TextSecondary, style = MaterialTheme.typography.bodySmall)
+            },
+            confirmButton = {
+                TextButton(onClick = onDismissExportError) {
+                    Text("OK", color = AccentBlue)
+                }
+            }
         )
     }
 

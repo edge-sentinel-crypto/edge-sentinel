@@ -12,6 +12,7 @@ package com.bp22intel.edgesentinel.widget
 
 import android.content.Context
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.glance.GlanceId
@@ -53,9 +54,9 @@ private fun ThreatStatusContent(
     isRunning: Boolean
 ) {
     val statusColor = when (threatLevel) {
-        ThreatLevel.CLEAR -> ColorProvider(android.graphics.Color.parseColor("#10B981"))
-        ThreatLevel.SUSPICIOUS -> ColorProvider(android.graphics.Color.parseColor("#F59E0B"))
-        ThreatLevel.THREAT -> ColorProvider(android.graphics.Color.parseColor("#EF4444"))
+        ThreatLevel.CLEAR -> ColorProvider(Color(0xFF10B981))
+        ThreatLevel.SUSPICIOUS -> ColorProvider(Color(0xFFF59E0B))
+        ThreatLevel.THREAT -> ColorProvider(Color(0xFFEF4444))
     }
 
     val statusLabel = when (threatLevel) {

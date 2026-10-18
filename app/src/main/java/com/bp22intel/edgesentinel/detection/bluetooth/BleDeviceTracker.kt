@@ -11,6 +11,7 @@
 package com.bp22intel.edgesentinel.detection.bluetooth
 
 import android.bluetooth.le.ScanRecord
+import android.annotation.SuppressLint
 import android.bluetooth.le.ScanResult
 import com.bp22intel.edgesentinel.data.local.dao.BleDeviceDao
 import com.bp22intel.edgesentinel.data.local.entity.BleDeviceEntity
@@ -67,6 +68,13 @@ class BleDeviceTracker @Inject constructor(
         val existing = bleDeviceDao.getByMacAddress(address)
             ?: bleDeviceDao.getByAdvertisingHash(advHash)
 
+        @SuppressLint("MissingPermission") // BLUETOOTH_CONNECT permission guarded by try-catch with scanRecord fallback
+        val deviceName = try {
+            scanResult.scanRecord?.deviceName ?: scanResult.device.name
+        } catch (_: SecurityException) {
+            scanResult.scanRecord?.deviceName
+        }
+
         if (existing != null) {
             val updatedClusters = updateLocationClusters(
                 existing.locationClusters, latitude, longitude
@@ -76,7 +84,7 @@ class BleDeviceTracker @Inject constructor(
                     macAddress = address,
                     advertisingDataHash = advHash,
                     manufacturerId = manufacturerId,
-                    deviceName = scanResult.device.name ?: existing.deviceName,
+                    deviceName = deviceName ?: existing.deviceName,
                     lastSeen = now,
                     locationClusters = updatedClusters,
                     seenCount = existing.seenCount + 1,
@@ -91,7 +99,7 @@ class BleDeviceTracker @Inject constructor(
                     macAddress = address,
                     advertisingDataHash = advHash,
                     manufacturerId = manufacturerId,
-                    deviceName = scanResult.device.name,
+                    deviceName = deviceName,
                     firstSeen = now,
                     lastSeen = now,
                     locationClusters = locationClusters,

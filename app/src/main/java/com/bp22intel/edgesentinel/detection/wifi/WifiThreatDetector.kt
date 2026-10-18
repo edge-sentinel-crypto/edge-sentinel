@@ -46,6 +46,19 @@ class WifiThreatDetector @Inject constructor(
 ) {
 
     companion object {
+        /**
+         * NF3/N5: a BSSID counts as known for an SSID only after it was seen in
+         * at least this many separate scans ...
+         */
+        const val MIN_BSSID_SIGHTINGS = 3
+
+        /** ... spread over at least this long (first sighting to latest sighting). */
+        const val MIN_BSSID_ESTABLISHED_MS = 24L * 60 * 60 * 1000
+
+        /** Bound the per-BSSID record store. */
+        private const val MAX_BSSID_RECORDS = 5_000
+        private const val BSSID_RECORD_TTL_MS = 30L * 24 * 60 * 60 * 1000
+
         /** Signal stronger than this for a new AP is suspicious. */
         private const val ROGUE_SIGNAL_THRESHOLD = -40
 
@@ -94,7 +107,7 @@ class WifiThreatDetector @Inject constructor(
     ): List<WifiDetectionResult> {
         val results = mutableListOf<WifiDetectionResult>()
 
-        detectEvilTwins(current, trustedSsids)?.let { results.addAll(it) }
+        detectEvilTwins(current, trustedSsids, history)?.let { results.addAll(it) }
         detectRogueAps(current, history)?.let { results.addAll(it) }
         detectDeauthAttack(disconnectTimestamps)?.let { results.add(it) }
         detectSsidSpoofing(current)?.let { results.addAll(it) }
@@ -148,11 +161,81 @@ class WifiThreatDetector @Inject constructor(
      * (e.g., open AP among secured ones) are still flagged even for trusted
      * SSIDs — an attacker could spoof a trusted network name.
      */
+    /**
+     * NF3/N5: per-(SSID, BSSID) sighting record. Replaces the old per-SSID
+     * union of BSSIDs, which let a never-seen combination pass and counted
+     * sightings per SSID instead of per BSSID.
+     */
+    data class BssidRecord(
+        val firstSeen: Long,
+        var lastSeen: Long,
+        var sightings: Int,
+        var securityType: SecurityType,
+        /** Timestamp of the last scan counted, so each scan counts once. */
+        var lastCountedScan: Long
+    )
+
+    /** Keyed by "ssid\u0000bssid". In-memory; survives across scans in this process. */
+    private val bssidRecords = HashMap<String, BssidRecord>()
+
+    private fun recordKey(ssid: String, bssid: String) = ssid + "\u0000" + bssid
+
+    /** Counts every (SSID, BSSID) in [snap] once for this scan. */
+    private fun recordSnapshot(snap: WifiScanSnapshot) {
+        val ts = snap.timestamp
+        for (ap in snap.accessPoints) {
+            if (ap.ssid.isBlank()) continue
+            val key = recordKey(ap.ssid, ap.bssid.lowercase())
+            val rec = bssidRecords[key]
+            if (rec == null) {
+                bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts)
+            } else if (ts > rec.lastCountedScan) {
+                rec.sightings += 1
+                rec.lastCountedScan = ts
+                if (ts > rec.lastSeen) rec.lastSeen = ts
+                if (rec.securityType != ap.securityType) {
+                    // Security changed for this BSSID: restart its record.
+                    bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts)
+                }
+            }
+        }
+    }
+
+    private fun pruneRecords(now: Long) {
+        bssidRecords.entries.removeAll { now - it.value.lastSeen > BSSID_RECORD_TTL_MS }
+        if (bssidRecords.size > MAX_BSSID_RECORDS) {
+            bssidRecords.entries.sortedBy { it.value.lastSeen }
+                .take(bssidRecords.size - MAX_BSSID_RECORDS)
+                .map { it.key }
+                .forEach { bssidRecords.remove(it) }
+        }
+    }
+
+    /**
+     * True when [ap] is an established BSSID for its SSID: seen in at least
+     * [MIN_BSSID_SIGHTINGS] separate prior scans over at least
+     * [MIN_BSSID_ESTABLISHED_MS], with the same security type as now.
+     */
+    private fun isEstablished(ap: ObservedAp): Boolean {
+        val rec = bssidRecords[recordKey(ap.ssid, ap.bssid.lowercase())] ?: return false
+        return rec.sightings >= MIN_BSSID_SIGHTINGS &&
+            rec.lastSeen - rec.firstSeen >= MIN_BSSID_ESTABLISHED_MS &&
+            rec.securityType == ap.securityType
+    }
+
     private fun detectEvilTwins(
         scan: WifiScanSnapshot,
-        trustedSsids: Set<String> = emptySet()
+        trustedSsids: Set<String> = emptySet(),
+        history: List<WifiScanSnapshot> = emptyList()
     ): List<WifiDetectionResult>? {
         val results = mutableListOf<WifiDetectionResult>()
+
+        // NF3/N5: update the per-BSSID records from prior scans (each scan
+        // counts once, oldest first). The current scan is recorded only AFTER
+        // the decision, so it can never vouch for itself.
+        synchronized(bssidRecords) {
+            history.filter { it !== scan }.sortedBy { it.timestamp }.forEach { recordSnapshot(it) }
+        }
 
         // Group by SSID, ignore hidden/empty SSIDs
         val bySsid = scan.accessPoints
@@ -174,6 +257,17 @@ class WifiThreatDetector @Inject constructor(
             // For trusted SSIDs: skip the multiple-BSSID heuristic entirely
             // UNLESS there's a security mismatch (open+secured = possible attack)
             if (isTrustedSsid && !hasOpenAndSecured) {
+                continue
+            }
+
+            // NF3/N5: skip only when EVERY current BSSID is individually
+            // established for this SSID (>= MIN_BSSID_SIGHTINGS scans over
+            // >= 24 h, same security). A new or not-yet-established BSSID, or
+            // one whose security changed, fires.
+            val allEstablished = synchronized(bssidRecords) {
+                aps.distinctBy { it.bssid.lowercase() }.all { isEstablished(it) }
+            }
+            if (allEstablished && !hasOpenAndSecured) {
                 continue
             }
 
@@ -227,6 +321,12 @@ class WifiThreatDetector @Inject constructor(
             )
         }
 
+
+        // Record the current scan now that the decision is made.
+        synchronized(bssidRecords) {
+            recordSnapshot(scan)
+            pruneRecords(scan.timestamp)
+        }
         return results.ifEmpty { null }
     }
 

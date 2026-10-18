@@ -102,7 +102,7 @@ class MeshAlertAggregator(private val localDeviceId: String) {
 
         // Cap buffer size
         while (current.size > MAX_BUFFER_SIZE) {
-            current.removeFirst()
+            current.removeAt(0)
         }
 
         _meshAlerts.value = current

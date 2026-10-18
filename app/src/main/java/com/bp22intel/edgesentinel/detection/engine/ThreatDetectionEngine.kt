@@ -78,7 +78,29 @@ class ThreatDetectionEngine @Inject constructor(
         longitude: Double? = null,
         isMoving: Boolean? = null,
         speed: Double? = null
-    ): List<DetectionResult> = coroutineScope {
+    ): List<DetectionResult> =
+        runScanWithScore(cells, history, sensitivity, latitude, longitude, isMoving, speed).results
+
+    /** N2: results and the scoring result of ONE scan, returned together. */
+    data class ScanOutcome(
+        val results: List<DetectionResult>,
+        val scoringResult: ThreatScorer.ScoringResult?
+    )
+
+    /**
+     * N2: scan-local variant of [runScan]. Callers (service, worker) must use the
+     * returned [ScanOutcome.scoringResult], never the shared [lastScoringResult],
+     * because the service and the worker can scan concurrently.
+     */
+    suspend fun runScanWithScore(
+        cells: List<CellTower>,
+        history: List<CellTower>,
+        sensitivity: DetectionSensitivity = DetectionSensitivity.MEDIUM,
+        latitude: Double? = null,
+        longitude: Double? = null,
+        isMoving: Boolean? = null,
+        speed: Double? = null
+    ): ScanOutcome = coroutineScope {
         // Run all detectors in parallel
         val detectorResults = detectors.map { detector ->
             async {
@@ -126,7 +148,7 @@ class ThreatDetectionEngine @Inject constructor(
 
         if (results.isEmpty()) {
             lastScoringResult = null
-            return@coroutineScope emptyList()
+            return@coroutineScope ScanOutcome(emptyList(), null)
         }
 
         // ---- Build category indicators from detection results ----
@@ -175,8 +197,8 @@ class ThreatDetectionEngine @Inject constructor(
         val scoringResult = scorer.calculateScore(indicators, sensitivity, compoundPatterns)
         lastScoringResult = scoringResult
 
-        // Return individual results ordered by severity
-        results.sortedByDescending { it.score }
+        // Return individual results ordered by severity, with this scan's score
+        ScanOutcome(results.sortedByDescending { it.score }, scoringResult)
     }
 
     // -----------------------------------------------------------------

@@ -154,9 +154,41 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
         cells: List<CellTower>,
         history: List<CellTower>
     ): DetectionResult? {
-        if (cells.isEmpty() || history.isEmpty()) return null
+        if (cells.isEmpty()) return null
 
         val now = System.currentTimeMillis()
+
+        // Evaluate only the registered (serving) cell. Neighbour cells on an
+        // older RAT are normal and must not count as a downgrade.
+        // N8: if no cell reports isRegistered (some OEMs, CDMA path), pick the
+        // cell with the strongest signal and the highest RAT rank.
+        val servingCell = cells.firstOrNull { it.isRegistered }
+            ?: cells.maxWith(
+                compareBy<CellTower> { it.signalStrength }
+                    .thenBy { GENERATION_RANK[it.networkType] ?: -1 }
+            )
+        val servingRank = GENERATION_RANK[servingCell.networkType] ?: -1
+
+        try {
+            return analyzeServingCell(cells, servingCell, servingRank, history, now)
+        } finally {
+            // Update the last observed rank on EVERY scan so the next scan's
+            // speed-of-downgrade check compares against fresh data.
+            if (servingRank >= 0) {
+                lastObservedRank = servingRank
+                lastObservedRankTimestamp = now
+            }
+        }
+    }
+
+    private fun analyzeServingCell(
+        cells: List<CellTower>,
+        servingCell: CellTower,
+        servingRank: Int,
+        history: List<CellTower>,
+        now: Long
+    ): DetectionResult? {
+        if (history.isEmpty()) return null
         val recentHistory = history.filter { now - it.lastSeen < HISTORY_WINDOW_MS }
         if (recentHistory.isEmpty()) return null
 
@@ -197,12 +229,13 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
         val indicators = mutableMapOf<String, String>()
         var maxScore = 0.0
 
-        for (cell in cells) {
-            val currentRank = GENERATION_RANK[cell.networkType] ?: continue
-            if (currentRank < 0) continue
+        run {
+            val cell = servingCell
+            val currentRank = servingRank
+            if (currentRank < 0) return null
 
             val downgradeSteps = historicalRank - currentRank
-            if (downgradeSteps <= 0) continue
+            if (downgradeSteps <= 0) return null
 
             // Base downgrade detected — compute compound score
             var cellScore = baseDowngradeScore(downgradeSteps)
@@ -221,13 +254,9 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
                 cellScore *= speedMultiplier
             }
 
-            // ── 2. Stationary downgrade ─────────────────────────────────
-            val stationaryMultiplier = assessStationaryDowngrade(now)
-            if (stationaryMultiplier > 1.0) {
-                indicators["stationary_${cell.cid}"] =
-                    "Device is stationary — network downgrade without movement is suspicious"
-                cellScore *= stationaryMultiplier
-            }
+            // ── 2. Stationary downgrade: removed. The old multiplier was
+            //    always 1.8 whenever any position existed (no motion test).
+            //    Motion context is applied by ThreatDetectionEngine via isMoving.
 
             // ── 3. Carrier capability awareness ─────────────────────────
             val carrierMultiplier = assessCarrierCapability(cell, downgradeSteps)
@@ -256,14 +285,6 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
 
         if (maxScore <= 0.0) return null
 
-        // Update last observed rank for next scan's speed-of-downgrade check
-        val currentBestRank = cells
-            .mapNotNull { GENERATION_RANK[it.networkType] }
-            .filter { it >= 0 }
-            .maxOrNull() ?: historicalRank
-        lastObservedRank = currentBestRank
-        lastObservedRankTimestamp = now
-
         // ── 6. Downgrade frequency escalation ───────────────────────────
         val recentDowngradeCount = countRecentDowngrades(now)
         if (recentDowngradeCount >= DOWNGRADE_FREQUENCY_ATTACK_THRESHOLD) {
@@ -275,7 +296,7 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
         }
 
         // ── 7. Roaming assessment ───────────────────────────────────────
-        val roamingState = assessRoaming(cells, historicalRank, recentHistory)
+        val roamingState = assessRoaming(listOf(servingCell), historicalRank, recentHistory)
         if (roamingState == RoamingState.LIKELY_ROAMING) {
             maxScore *= 0.4
             indicators["roaming"] = "Likely international roaming — downgrade may be legitimate"
@@ -345,30 +366,8 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
      *
      * @return Multiplier >= 1.0. Stationary = 1.8, unknown = 1.0.
      */
-    private fun assessStationaryDowngrade(now: Long): Double {
-        val lat = lastLatitude ?: return 1.0
-        val lon = lastLongitude ?: return 1.0
-        val posTs = lastPositionTimestamp
-
-        // Position data too stale to be useful
-        if (now - posTs > POSITION_STALENESS_MS) return 1.0
-
-        // We need at least two position readings to assess motion.
-        // For now, if we have a recent position and no significant movement
-        // between the position in our cell history vs current cells, flag it.
-        // The position update happens from cell lat/lon — if those haven't
-        // changed significantly, device is stationary.
-        //
-        // Since we only get cell-reported positions (not GPS), the resolution
-        // is coarse. But if available, it's still useful.
-        return if (lat != 0.0 && lon != 0.0) {
-            // We have position — rely on caller context or GPS data embedded
-            // in cells. If position hasn't moved since last update, stationary.
-            1.8
-        } else {
-            1.0
-        }
-    }
+    // assessStationaryDowngrade() removed (F4): it returned 1.8 whenever any
+    // position was cached, with no motion test, so every downgrade was boosted.
 
     /**
      * Major carriers have extensive 4G/5G coverage. A 2G fallback on T-Mobile,

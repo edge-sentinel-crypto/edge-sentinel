@@ -108,9 +108,9 @@ class ThreatScorer @Inject constructor() {
         private const val SCORE_SCALE = 10.0
 
         /** Default threshold: score ≥ this → SUSPICIOUS (legacy 3-level). */
-        private const val SUSPICIOUS_THRESHOLD = 3.0
+        const val SUSPICIOUS_THRESHOLD = 3.0
         /** Default threshold: score ≥ this → THREAT (legacy 3-level). */
-        private const val THREAT_THRESHOLD     = 6.0
+        const val THREAT_THRESHOLD     = 6.0
 
         /** 4-level thresholds (FusedThreatLevel). */
         private const val ELEVATED_THRESHOLD  = 2.0

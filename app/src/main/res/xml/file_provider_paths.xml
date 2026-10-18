@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
+    <files-path name="travel_exports_files" path="travel_exports/" />
+    <cache-path name="travel_exports_cache" path="travel_exports/" />
+    <cache-path name="logs" path="logs/" />
     <cache-path name="exports" path="exports/" />
 </paths>

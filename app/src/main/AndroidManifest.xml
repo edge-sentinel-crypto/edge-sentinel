@@ -24,8 +24,9 @@
          transmitted. See detection/network/ for implementation details. -->
     <uses-permission android:name="android.permission.INTERNET" />
 
-    <!-- Notifications for threat alerts -->
+    <!-- Notifications and tactile alerts -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <!-- Battery optimization exemption for continuous monitoring -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />

@@ -17,6 +17,7 @@ import com.bp22intel.edgesentinel.detection.detectors.NetworkDowngradeDetector
 import com.bp22intel.edgesentinel.detection.detectors.NrDetector
 import com.bp22intel.edgesentinel.detection.detectors.RegistrationFailureDetector
 import com.bp22intel.edgesentinel.detection.detectors.SilentSmsDetector
+import com.bp22intel.edgesentinel.detection.detectors.TemporalAnomalyDetector
 import com.bp22intel.edgesentinel.detection.detectors.ThreatDetector
 import com.bp22intel.edgesentinel.detection.detectors.TrackingPatternDetector
 import dagger.Binds
@@ -60,4 +61,8 @@ abstract class DetectionModule {
     @Binds
     @IntoSet
     abstract fun bindBehavioralBaselineDetector(impl: BehavioralBaselineDetector): ThreatDetector
+
+    @Binds
+    @IntoSet
+    abstract fun bindTemporalAnomalyDetector(impl: TemporalAnomalyDetector): ThreatDetector
 }

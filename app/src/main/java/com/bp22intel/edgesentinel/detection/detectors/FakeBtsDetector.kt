@@ -361,7 +361,8 @@ class FakeBtsDetector @Inject constructor() : ThreatDetector {
             var badTac: Boolean = false,
             var badCidFormat: Boolean = false,
             var pciReuse: Boolean = false,
-            var pathLossAnomaly: Boolean = false
+            var pathLossAnomaly: Boolean = false,
+            var missingNeighbors: Boolean = false
         )
 
         val cellFlags = mutableMapOf<Int, CellFlags>()
@@ -383,11 +384,10 @@ class FakeBtsDetector @Inject constructor() : ThreatDetector {
             }
 
             // ── Check 2: Unknown Cell ID ────────────────────────────────────
+            // An unseen CID alone is normal (every handover to a new cell).
+            // Only flag here; it scores after the loop when a second
+            // indicator fires on the SAME cell.
             if (cell.cid !in knownCids && history.isNotEmpty()) {
-                baseScore += 1.0
-                indicators["unknown_cid_${cell.cid}"] =
-                    "Cell ID ${cell.cid} not found in observation history " +
-                    "(${knownCids.size} known cells)"
                 flags.unknownCid = true
             }
 
@@ -433,6 +433,8 @@ class FakeBtsDetector @Inject constructor() : ThreatDetector {
 
             if (avgHistoricalNeighbors > 2.0) {
                 baseScore += 1.0
+                // N6: the single visible cell is the one missing its neighbours.
+                cellFlags[cells.first().cid]?.missingNeighbors = true
                 indicators["missing_neighbors"] =
                     "Only 1 cell visible; historical average is %.1f per LAC/TAC"
                         .format(avgHistoricalNeighbors)
@@ -444,8 +446,28 @@ class FakeBtsDetector @Inject constructor() : ThreatDetector {
         for (result in pciResult) {
             baseScore += result.first
             indicators[result.second] = result.third
-            // Mark the relevant cell
-            cellFlags.values.forEach { it.pciReuse = true }
+            // N6: mark only the cell that reuses the PCI (key pci_reuse_<cid>_<other>).
+            result.second.removePrefix("pci_reuse_").substringBefore('_').toIntOrNull()
+                ?.let { cellFlags[it]?.pciReuse = true }
+        }
+
+        // ── Check 2 (deferred): unseen CID scores only with a second
+        //    per-cell indicator (strong signal, carrier, band, TAC, format,
+        //    PCI reuse, or missing neighbours — N6). PCI and neighbour checks
+        //    therefore run BEFORE this loop.
+        for ((cid, flags) in cellFlags) {
+            if (!flags.unknownCid) continue
+            val hasSecondIndicator = flags.strongSignal || flags.pathLossAnomaly ||
+                flags.badCarrier || flags.badBand || flags.badTac || flags.badCidFormat ||
+                flags.pciReuse || flags.missingNeighbors
+            if (hasSecondIndicator) {
+                baseScore += 1.0
+                indicators["unknown_cid_$cid"] =
+                    "Cell ID $cid not found in observation history " +
+                    "(${knownCids.size} known cells) and shows another anomaly"
+            } else {
+                flags.unknownCid = false
+            }
         }
 
         // ════════════════════════════════════════════════════════════════════

@@ -160,7 +160,7 @@ class CooperativeLocalizationManager(
             cidObs.add(observation)
 
             // Cap per-CID observations
-            while (cidObs.size > 50) cidObs.removeFirst()
+            while (cidObs.size > 50) cidObs.removeAt(0)
 
             // Update peer count
             _peerCount.value = peerObservationsByCid.values

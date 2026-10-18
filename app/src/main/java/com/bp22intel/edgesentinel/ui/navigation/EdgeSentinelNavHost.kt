@@ -220,7 +220,13 @@ fun EdgeSentinelNavHost(initialAlertId: Long? = null) {
                 val viewModel: TravelModeViewModel = hiltViewModel()
                 val travelState by viewModel.travelState.collectAsState()
                 val checkedItems by viewModel.checkedItems.collectAsState()
+                val exportError by viewModel.exportError.collectAsState()
+                val wipeError by viewModel.wipeError.collectAsState()
                 TravelModeScreen(
+                    exportError = exportError,
+                    wipeError = wipeError,
+                    onDismissWipeError = viewModel::acknowledgeWipeError,
+                    onDismissExportError = viewModel::clearExportError,
                     travelState = travelState,
                     checkedItems = checkedItems,
                     onBack = { navController.popBackStack() },

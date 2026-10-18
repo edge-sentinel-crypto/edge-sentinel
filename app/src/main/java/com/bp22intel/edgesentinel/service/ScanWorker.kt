@@ -25,6 +25,10 @@ import com.bp22intel.edgesentinel.domain.model.ThreatLevel
 import com.bp22intel.edgesentinel.domain.repository.AlertRepository
 import com.bp22intel.edgesentinel.domain.repository.CellRepository
 import com.bp22intel.edgesentinel.domain.repository.ScanRepository
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import com.bp22intel.edgesentinel.sensor.MotionDetector
+import com.bp22intel.edgesentinel.sensor.MotionState
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import kotlinx.coroutines.flow.first
@@ -39,7 +43,9 @@ class ScanWorker @AssistedInject constructor(
     private val cellRepository: CellRepository,
     private val alertRepository: AlertRepository,
     private val scanRepository: ScanRepository,
-    private val towerPositionTracker: com.bp22intel.edgesentinel.detection.geo.TowerPositionTracker
+    private val towerPositionTracker: com.bp22intel.edgesentinel.detection.geo.TowerPositionTracker,
+    private val settingsDataStore: DataStore<Preferences>,
+    private val motionDetector: MotionDetector
 ) : CoroutineWorker(appContext, workerParams) {
 
     companion object {
@@ -60,6 +66,23 @@ class ScanWorker @AssistedInject constructor(
 
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_WORK_NAME)
+        }
+
+        /**
+         * N3: cancels the unique work, waits for WorkManager to record the
+         * cancel, then waits until no instance is RUNNING (bounded by [timeoutMs]).
+         * Blocking; call from Dispatchers.IO.
+         */
+        fun cancelAndAwait(context: Context, timeoutMs: Long) {
+            val wm = WorkManager.getInstance(context)
+            val deadline = System.currentTimeMillis() + timeoutMs
+            wm.cancelUniqueWork(UNIQUE_WORK_NAME).result.get(timeoutMs, TimeUnit.MILLISECONDS)
+            while (System.currentTimeMillis() < deadline) {
+                val infos = wm.getWorkInfosForUniqueWork(UNIQUE_WORK_NAME)
+                    .get(timeoutMs, TimeUnit.MILLISECONDS)
+                if (infos.none { it.state == androidx.work.WorkInfo.State.RUNNING }) return
+                Thread.sleep(100)
+            }
         }
     }
 
@@ -98,22 +121,20 @@ class ScanWorker @AssistedInject constructor(
             }
 
             // Run threat detection
-            val detectionResults = threatDetectionEngine.runScan(
+            val sensitivity = ScanThreatLevels.readSensitivity(settingsDataStore)
+            val motionKnown = motionDetector.motionState.value != MotionState.UNKNOWN
+            val outcome = threatDetectionEngine.runScanWithScore(
                 cells = currentCells,
-                history = history
+                history = history,
+                sensitivity = sensitivity,
+                latitude = userLocation?.latitude,
+                longitude = userLocation?.longitude,
+                isMoving = if (motionKnown) motionDetector.isMoving else null
             )
+            val detectionResults = outcome.results
 
-            // Determine overall threat level
-            val scanThreatLevel = if (detectionResults.isEmpty()) {
-                ThreatLevel.CLEAR
-            } else {
-                val maxScore = detectionResults.maxOf { it.score }
-                when {
-                    maxScore >= 0.7 -> ThreatLevel.THREAT
-                    maxScore >= 0.4 -> ThreatLevel.SUSPICIOUS
-                    else -> ThreatLevel.CLEAR
-                }
-            }
+            // Overall level comes from the ThreatScorer result.
+            val scanThreatLevel = ScanThreatLevels.overallLevel(outcome.scoringResult, detectionResults, sensitivity)
 
             // Save scan result
             val durationMs = System.currentTimeMillis() - startTime
@@ -127,11 +148,7 @@ class ScanWorker @AssistedInject constructor(
 
             // Create alerts for suspicious or threatening results
             for (result in detectionResults) {
-                val severity = when {
-                    result.score >= 0.7 -> ThreatLevel.THREAT
-                    result.score >= 0.4 -> ThreatLevel.SUSPICIOUS
-                    else -> ThreatLevel.CLEAR
-                }
+                val severity = ScanThreatLevels.alertSeverity(result.score, sensitivity)
 
                 if (severity == ThreatLevel.SUSPICIOUS || severity == ThreatLevel.THREAT) {
                     val alert = Alert(

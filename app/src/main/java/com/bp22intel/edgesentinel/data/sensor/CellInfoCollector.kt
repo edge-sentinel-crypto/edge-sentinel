@@ -43,16 +43,31 @@ class CellInfoCollector @Inject constructor(
         }
 
         return cellInfoList.mapNotNull { cellInfo ->
-            when (cellInfo) {
-                is CellInfoLte -> {
+            val isReg = cellInfo.isRegistered
+            when {
+                cellInfo is CellInfoLte -> {
                     val identity = cellInfo.cellIdentity
                     val signal = cellInfo.cellSignalStrength
+                    val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mccString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mcc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
+                    val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mncString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mnc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
                     CellTower(
                         id = 0,
                         cid = identity.ci,
                         lacTac = identity.tac,
-                        mcc = identity.mccString?.toIntOrNull() ?: 0,
-                        mnc = identity.mncString?.toIntOrNull() ?: 0,
+                        mcc = mcc,
+                        mnc = mnc,
                         signalStrength = signal.dbm,
                         networkType = NetworkType.LTE,
                         latitude = null,
@@ -61,25 +76,37 @@ class CellInfoCollector @Inject constructor(
                         lastSeen = now,
                         timesSeen = 1,
                         earfcn = identity.earfcn,
-                        pci = identity.pci
+                        pci = identity.pci,
+                        isRegistered = isReg
                     )
                 }
-                is CellInfoNr -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        extractNrCellTower(cellInfo, now)
-                    } else {
-                        null
-                    }
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && cellInfo is CellInfoNr -> {
+                    // CellInfoNr is guarded by SDK_INT >= Q
+                    extractNrCellTower(cellInfo, now)?.copy(isRegistered = isReg)
                 }
-                is CellInfoGsm -> {
+                cellInfo is CellInfoGsm -> {
                     val identity = cellInfo.cellIdentity
                     val signal = cellInfo.cellSignalStrength
+                    val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mccString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mcc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
+                    val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mncString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mnc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
                     CellTower(
                         id = 0,
                         cid = identity.cid,
                         lacTac = identity.lac,
-                        mcc = identity.mccString?.toIntOrNull() ?: 0,
-                        mnc = identity.mncString?.toIntOrNull() ?: 0,
+                        mcc = mcc,
+                        mnc = mnc,
                         signalStrength = signal.dbm,
                         networkType = NetworkType.GSM,
                         latitude = null,
@@ -87,18 +114,33 @@ class CellInfoCollector @Inject constructor(
                         firstSeen = now,
                         lastSeen = now,
                         timesSeen = 1,
-                        earfcn = identity.arfcn
+                        earfcn = identity.arfcn,
+                        isRegistered = isReg
                     )
                 }
-                is CellInfoWcdma -> {
+                cellInfo is CellInfoWcdma -> {
                     val identity = cellInfo.cellIdentity
                     val signal = cellInfo.cellSignalStrength
+                    val mcc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mccString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mcc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
+                    val mnc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        identity.mncString?.toIntOrNull() ?: 0
+                    } else {
+                        @Suppress("DEPRECATION")
+                        val v = identity.mnc
+                        if (v == Int.MAX_VALUE) 0 else v
+                    }
                     CellTower(
                         id = 0,
                         cid = identity.cid,
                         lacTac = identity.lac,
-                        mcc = identity.mccString?.toIntOrNull() ?: 0,
-                        mnc = identity.mncString?.toIntOrNull() ?: 0,
+                        mcc = mcc,
+                        mnc = mnc,
                         signalStrength = signal.dbm,
                         networkType = NetworkType.WCDMA,
                         latitude = null,
@@ -107,10 +149,11 @@ class CellInfoCollector @Inject constructor(
                         lastSeen = now,
                         timesSeen = 1,
                         earfcn = identity.uarfcn,
-                        pci = identity.psc
+                        pci = identity.psc,
+                        isRegistered = isReg
                     )
                 }
-                is CellInfoCdma -> {
+                cellInfo is CellInfoCdma -> {
                     val identity = cellInfo.cellIdentity
                     val signal = cellInfo.cellSignalStrength
                     CellTower(
@@ -125,7 +168,8 @@ class CellInfoCollector @Inject constructor(
                         longitude = identity.longitude.toDouble(),
                         firstSeen = now,
                         lastSeen = now,
-                        timesSeen = 1
+                        timesSeen = 1,
+                        isRegistered = isReg
                     )
                 }
                 else -> null
@@ -198,8 +242,24 @@ class CellInfoCollector @Inject constructor(
     fun getSignalStrength(): Int {
         return try {
             val cellInfoList = telephonyManager.allCellInfo ?: emptyList()
-            cellInfoList.firstOrNull { it.isRegistered }
-                ?.cellSignalStrength?.dbm ?: Int.MIN_VALUE
+            val registeredCell = cellInfoList.firstOrNull { it.isRegistered } ?: return Int.MIN_VALUE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                registeredCell.cellSignalStrength.dbm
+            } else {
+                when (registeredCell) {
+                    is CellInfoLte -> registeredCell.cellSignalStrength.dbm
+                    is CellInfoGsm -> registeredCell.cellSignalStrength.dbm
+                    is CellInfoWcdma -> registeredCell.cellSignalStrength.dbm
+                    is CellInfoCdma -> registeredCell.cellSignalStrength.dbm
+                    else -> {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && registeredCell is CellInfoNr) {
+                            registeredCell.cellSignalStrength.dbm
+                        } else {
+                            Int.MIN_VALUE
+                        }
+                    }
+                }
+            }
         } catch (e: SecurityException) {
             Int.MIN_VALUE
         }
