@@ -127,4 +127,16 @@ object AppModule {
     ): com.bp22intel.edgesentinel.travel.ProcessRestarter {
         return com.bp22intel.edgesentinel.travel.DefaultProcessRestarter(context)
     }
+
+    @Provides
+    @Singleton
+    fun provideMirrorClient(): com.bp22intel.edgesentinel.detection.tower.MirrorClient {
+        return com.bp22intel.edgesentinel.detection.tower.DefaultMirrorClient()
+    }
+
+    @Provides
+    @Singleton
+    fun provideOpenCelliDApi(): com.bp22intel.edgesentinel.detection.tower.OpenCelliDApi {
+        return com.bp22intel.edgesentinel.detection.tower.DefaultOpenCelliDApi()
+    }
 }

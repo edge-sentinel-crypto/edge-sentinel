@@ -15,6 +15,7 @@ import com.bp22intel.edgesentinel.service.MonitoringService
 import com.bp22intel.edgesentinel.travel.ProcessRestarter
 import com.bp22intel.edgesentinel.ui.travel.TravelModeViewModel
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -218,7 +219,7 @@ class Round5Test {
             throwOnRestart = IllegalStateException("Simulated restart crash")
         }
         val appScopeJob = Job()
-        val appScope = CoroutineScope(Dispatchers.IO + appScopeJob)
+        val appScope = CoroutineScope(Dispatchers.IO + appScopeJob + CoroutineExceptionHandler { _, _ -> })
         val viewModel = createViewModel(appScope, fakeRestarter)
 
         viewModel.panicWipe()

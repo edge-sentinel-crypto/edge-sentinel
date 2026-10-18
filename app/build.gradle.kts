@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.zip.GZIPOutputStream
 
 plugins {
     alias(libs.plugins.android.application)
@@ -28,6 +29,31 @@ val hasReleaseSigning = releaseStoreFilePath != null && releaseStorePassword != 
     releaseKeyAlias != null && releaseKeyPassword != null &&
     file(releaseStoreFilePath!!).exists()
 
+// AAPT automatically expands a source asset ending in .gz and strips that suffix.
+// Wrap each tower database in one build-time gzip layer so AAPT removes only the
+// outer layer and packages the original gzip bytes under the required .csv.gz name.
+val towerAssetSources = fileTree("src/main/assets") { include("*.csv.gz") }
+val generatedTowerAssetsDir = layout.buildDirectory.dir("generated/towerAssets")
+val prepareTowerAssets by tasks.registering {
+    inputs.files(towerAssetSources)
+    outputs.dir(generatedTowerAssetsDir)
+    doLast {
+        val outputDir = generatedTowerAssetsDir.get().asFile
+        outputDir.deleteRecursively()
+        outputDir.mkdirs()
+        towerAssetSources.files.forEach { source ->
+            val output = outputDir.resolve("${source.name}.gz")
+            GZIPOutputStream(output.outputStream().buffered()).use { gzip ->
+                source.inputStream().buffered().use { input -> input.copyTo(gzip) }
+            }
+        }
+    }
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    dependsOn(prepareTowerAssets)
+}
+
 android {
     namespace = "com.bp22intel.edgesentinel"
     compileSdk = 35
@@ -36,8 +62,8 @@ android {
         applicationId = "com.bp22intel.edgesentinel"
         minSdk = 26
         targetSdk = 35
-        versionCode = 98
-        versionName = "2.0.98"
+        versionCode = 99
+        versionName = "2.0.99"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -118,6 +144,16 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    sourceSets {
+        getByName("main").assets.setSrcDirs(listOf(generatedTowerAssetsDir))
+    }
+
+    androidResources {
+        // Preserve bundled tower databases as .csv.gz. Without this, AAPT expands
+        // them and strips .gz, while TowerDatabaseManager opens the .gz names.
+        noCompress += "gz"
     }
 }
 

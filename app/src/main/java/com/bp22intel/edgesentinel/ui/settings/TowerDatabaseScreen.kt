@@ -14,6 +14,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -27,26 +29,41 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -55,15 +72,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.rememberModalBottomSheetState
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import com.bp22intel.edgesentinel.ui.components.SectionHeader
 import com.bp22intel.edgesentinel.ui.theme.AccentBlue
 import com.bp22intel.edgesentinel.ui.theme.BackgroundPrimary
@@ -82,13 +90,19 @@ fun TowerDatabaseScreen(
 ) {
     val context = LocalContext.current
     var showExplainer by remember { mutableStateOf(false) }
+    var advancedExpanded by remember { mutableStateOf(false) }
+
     val countries by viewModel.countries.collectAsState()
     val totalTowerCount by viewModel.totalTowerCount.collectAsState()
     val isLoading by viewModel.isLoading.collectAsState()
+    val isOffline by viewModel.isOffline.collectAsState()
     val error by viewModel.error.collectAsState()
     val importSuccess by viewModel.importSuccess.collectAsState()
     val downloadingCountry by viewModel.downloadingCountry.collectAsState()
     val downloadProgress by viewModel.downloadProgress.collectAsState()
+    val apiToken by viewModel.apiToken.collectAsState()
+    val searchQuery by viewModel.searchQuery.collectAsState()
+    val selectedIso2s by viewModel.selectedIso2s.collectAsState()
 
     // Fallback: manual CSV import via file picker
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -105,17 +119,9 @@ fun TowerDatabaseScreen(
         }
     }
 
-    // Figure out which MCCs are already installed and compute grouped country list
-    val installedMccs = countries.filter { it.isInstalled }.map { it.mcc }.toSet()
-    val countryGroups = TowerDatabaseViewModel.AVAILABLE_COUNTRIES.map { group ->
-        group.copy(
-            isInstalled = group.mccs.any { it in installedMccs },
-            towerCount = group.mccs.sumOf { mcc ->
-                countries.find { it.mcc == mcc }?.towerCount ?: 0
-            }
-        )
-    }
-    val installedCountryCount = countryGroups.count { it.isInstalled }
+    val installedCountryCount = countries.count { it.isInstalled }
+    val hasInstalledNonBaseCountries = countries.any { it.isInstalled && !it.isBase }
+    val selectedCount = selectedIso2s.size
 
     LazyColumn(
         modifier = Modifier
@@ -137,7 +143,7 @@ fun TowerDatabaseScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "$totalTowerCount",
+                        text = "%,d".format(java.util.Locale.US, totalTowerCount),
                         style = MaterialTheme.typography.displaySmall,
                         fontWeight = FontWeight.Bold,
                         color = if (totalTowerCount > 0) StatusClear else TextSecondary
@@ -149,7 +155,7 @@ fun TowerDatabaseScreen(
                     )
                     if (totalTowerCount > 0) {
                         Text(
-                            text = "$installedCountryCount countries installed",
+                            text = "$installedCountryCount countries installed (US & Canada built in)",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary
                         )
@@ -173,29 +179,101 @@ fun TowerDatabaseScreen(
             }
         }
 
-        // Error/Success messages
-        error?.let { msg ->
-            item {
-                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.15f))) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(msg, style = MaterialTheme.typography.bodySmall, color = Color(0xFFEF4444), modifier = Modifier.weight(1f))
-                        TextButton(onClick = { viewModel.clearError() }) { Text("OK", color = Color(0xFFEF4444)) }
+        // Attribution
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Cell tower data from OpenCelliD, CC BY-SA 4.0",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AccentBlue,
+                    modifier = Modifier.clickable {
+                        try {
+                            val intent = Intent(
+                                Intent.ACTION_VIEW,
+                                Uri.parse("https://creativecommons.org/licenses/by-sa/4.0/")
+                            )
+                            context.startActivity(intent)
+                        } catch (_: Exception) {}
                     }
-                }
+                )
             }
         }
-        importSuccess?.let { msg ->
+
+        // Offline notice
+        if (isOffline) {
             item {
-                Card(colors = CardDefaults.cardColors(containerColor = StatusClear.copy(alpha = 0.15f))) {
-                    Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(msg, style = MaterialTheme.typography.bodySmall, color = StatusClear, modifier = Modifier.weight(1f))
-                        TextButton(onClick = { viewModel.clearSuccess() }) { Text("OK", color = StatusClear) }
+                Card(colors = CardDefaults.cardColors(containerColor = SurfaceVariant)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "Tower data mirror is unreachable (offline). Showing installed countries.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { viewModel.loadCountryList(forceRefreshManifest = true) }) {
+                            Text("Retry", color = AccentBlue)
+                        }
                     }
                 }
             }
         }
 
-        // Download progress
+        // Error message
+        error?.let { msg ->
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFFEF4444).copy(alpha = 0.15f))) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFFEF4444),
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { viewModel.clearError() }) {
+                            Text("OK", color = Color(0xFFEF4444))
+                        }
+                    }
+                }
+            }
+        }
+
+        // Success message
+        importSuccess?.let { msg ->
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = StatusClear.copy(alpha = 0.15f))) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            msg,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = StatusClear,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { viewModel.clearSuccess() }) {
+                            Text("OK", color = StatusClear)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Download progress banner
         if (downloadingCountry != null) {
             item {
                 Card(colors = CardDefaults.cardColors(containerColor = AccentBlue.copy(alpha = 0.1f))) {
@@ -204,84 +282,198 @@ fun TowerDatabaseScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = AccentBlue, strokeWidth = 2.dp)
-                        Text(downloadProgress, style = MaterialTheme.typography.bodySmall, color = AccentBlue)
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            color = AccentBlue,
+                            strokeWidth = 2.dp
+                        )
+                        Text(
+                            downloadProgress,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AccentBlue
+                        )
                     }
                 }
             }
         }
 
-        // API Token section
-        item {
-            SectionHeader(title = "OpenCelliD API Token")
+        // Batch Action Buttons
+        if (selectedCount > 0 || hasInstalledNonBaseCountries) {
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (selectedCount > 0) {
+                        Button(
+                            onClick = { viewModel.downloadSelected() },
+                            enabled = downloadingCountry == null,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentBlue,
+                                contentColor = BackgroundPrimary
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "Download Selected ($selectedCount)",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+
+                    if (hasInstalledNonBaseCountries) {
+                        Button(
+                            onClick = { viewModel.updateAllInstalledCountries() },
+                            enabled = downloadingCountry == null,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (selectedCount > 0) SurfaceVariant else AccentBlue,
+                                contentColor = if (selectedCount > 0) TextPrimary else BackgroundPrimary
+                            ),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                "Update All Installed",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
+                    }
+                }
+            }
         }
 
+        // Search Box
         item {
-            val currentToken by viewModel.apiToken.collectAsState()
-            var tokenInput by remember { mutableStateOf(currentToken ?: "") }
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = { viewModel.setSearchQuery(it) },
+                placeholder = { Text("Search countries or MCC...", color = TextSecondary) },
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Search,
+                        contentDescription = "Search",
+                        tint = TextSecondary,
+                        modifier = Modifier.size(18.dp)
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.setSearchQuery("") }) {
+                            Icon(
+                                imageVector = Icons.Filled.Clear,
+                                contentDescription = "Clear",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp)
+            )
+        }
 
+        // Collapsed Advanced section: OpenCelliD API Token
+        item {
             Card(
                 colors = CardDefaults.cardColors(containerColor = Surface),
                 shape = RoundedCornerShape(12.dp)
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        "Required for downloading tower data. Get a free token at opencellid.org",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.material3.OutlinedTextField(
-                            value = tokenInput,
-                            onValueChange = { tokenInput = it },
-                            label = { Text("API Token", color = TextSecondary) },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f),
-                            textStyle = MaterialTheme.typography.bodySmall.copy(color = TextPrimary)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = { viewModel.setApiToken(tokenInput) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AccentBlue,
-                                contentColor = BackgroundPrimary
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text("Save", style = MaterialTheme.typography.labelMedium)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { advancedExpanded = !advancedExpanded },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column {
+                            Text(
+                                "Advanced Settings",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                if (!apiToken.isNullOrBlank()) "OpenCelliD fallback token configured" else "Optional OpenCelliD token fallback",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
                         }
-                    }
-                    if (!currentToken.isNullOrBlank()) {
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "✅ Token saved",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = StatusClear
+                        Icon(
+                            imageVector = if (advancedExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                            contentDescription = if (advancedExpanded) "Collapse" else "Expand",
+                            tint = TextSecondary
                         )
+                    }
+
+                    AnimatedVisibility(visible = advancedExpanded) {
+                        var tokenInput by remember(apiToken) { mutableStateOf(apiToken ?: "") }
+
+                        Column(modifier = Modifier.padding(top = 12.dp)) {
+                            Text(
+                                "Optional fallback token from opencellid.org used only if the mirror download fails.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                OutlinedTextField(
+                                    value = tokenInput,
+                                    onValueChange = { tokenInput = it },
+                                    label = { Text("OpenCelliD API Token", color = TextSecondary) },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(color = TextPrimary)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Button(
+                                    onClick = { viewModel.setApiToken(tokenInput) },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = AccentBlue,
+                                        contentColor = BackgroundPrimary
+                                    ),
+                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Save", style = MaterialTheme.typography.labelMedium)
+                                }
+                            }
+                            if (!apiToken.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    "✅ Token saved",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = StatusClear
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // One-tap install section
+        // Country List Header
         item {
-            SectionHeader(title = "Install Tower Database")
+            SectionHeader(title = "Countries")
         }
 
-        item {
-            Text(
-                "Tap a country to download and install its tower database. This verifies your connected towers against known legitimate ones.",
-                style = MaterialTheme.typography.bodySmall,
-                color = TextSecondary
-            )
-        }
-
-        // Country install buttons — grouped by country (multi-MCC)
-        items(countryGroups, key = { it.name }) { country ->
-            val isDownloading = downloadingCountry == country.name
-            
+        // Countries
+        items(countries, key = { it.iso2 }) { country ->
             Card(
                 colors = CardDefaults.cardColors(containerColor = Surface),
                 shape = RoundedCornerShape(12.dp)
@@ -289,75 +481,97 @@ fun TowerDatabaseScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(14.dp),
+                        .padding(12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Country info
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = country.name,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
+                    if (country.isBase) {
+                        // Base country: not selectable, marked Built in
+                        Spacer(modifier = Modifier.width(6.dp))
+                    } else {
+                        // Checkbox for selection
+                        Checkbox(
+                            checked = country.isSelected,
+                            onCheckedChange = { viewModel.toggleSelection(country.iso2) },
+                            colors = CheckboxDefaults.colors(
+                                checkedColor = AccentBlue,
+                                checkmarkColor = BackgroundPrimary
+                            )
                         )
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+
+                    // Country details
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = country.name,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                            if (country.isBase) {
+                                Text(
+                                    text = "Built in",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = StatusClear,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+
+                        val metaParts = mutableListOf<String>()
+                        if (country.towerCount > 0) {
+                            metaParts.add("%,d towers".format(java.util.Locale.US, country.towerCount))
+                        }
+                        if (country.bytes > 0) {
+                            metaParts.add(formatBytes(country.bytes))
+                        }
+                        if (country.manifestDataDate.isNotBlank()) {
+                            metaParts.add("Data: ${country.manifestDataDate}")
+                        }
+                        if (metaParts.isNotEmpty()) {
+                            Text(
+                                text = metaParts.joinToString(" • "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+
+                        // Status line
                         Text(
-                            text = if (country.isInstalled) "${country.towerCount} towers" else "MCC ${country.mccs.joinToString(", ")}",
+                            text = country.statusDisplay,
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (country.isInstalled) StatusClear else TextSecondary
+                            fontWeight = if (country.status == CountryInstallStatus.UPDATE_AVAILABLE) FontWeight.SemiBold else FontWeight.Normal,
+                            color = when (country.status) {
+                                CountryInstallStatus.UPDATE_AVAILABLE -> StatusElevated
+                                CountryInstallStatus.INSTALLED -> StatusClear
+                                CountryInstallStatus.NOT_INSTALLED -> TextSecondary
+                            }
                         )
                     }
 
-                    if (country.isInstalled) {
-                        // Installed — show checkmark + delete
-                        Icon(
-                            imageVector = Icons.Filled.Check,
-                            contentDescription = "Installed",
-                            tint = StatusClear,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
+                    // Delete button for non-base installed countries
+                    if (!country.isBase && country.isInstalled) {
                         IconButton(
-                            onClick = { viewModel.deleteCountry(country.mccs) },
+                            onClick = { viewModel.deleteCountry(country.iso2, country.mccs) },
                             modifier = Modifier.size(32.dp)
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.Delete,
-                                contentDescription = "Remove",
+                                contentDescription = "Remove ${country.name}",
                                 tint = TextSecondary,
                                 modifier = Modifier.size(18.dp)
                             )
-                        }
-                    } else if (isDownloading) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(24.dp),
-                            color = AccentBlue,
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        // Not installed — install button
-                        Button(
-                            onClick = { viewModel.installCountry(country.mccs, country.name) },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AccentBlue,
-                                contentColor = BackgroundPrimary
-                            ),
-                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Filled.Download,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Install", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
             }
         }
 
-        // Manual import as fallback (collapsed section)
+        // Manual import section (collapsed at bottom)
         item {
             Spacer(modifier = Modifier.height(8.dp))
             SectionHeader(title = "Manual Import")
@@ -423,7 +637,7 @@ private fun TowerVerificationExplainer() {
 
         ExplainerSection(
             title = "What is this database?",
-            body = "Edge Sentinel ships with a database of 1.3 million known cell towers in the United States. When your phone connects to a tower, the app checks it against this database to determine if it's a recognized piece of infrastructure or something unknown."
+            body = "Edge Sentinel ships with a database of known cell towers in the United States and Canada. When your phone connects to a tower, the app checks it against this database to determine if it's a recognized piece of infrastructure or something unknown."
         )
 
         ExplainerSection(
@@ -477,8 +691,8 @@ private fun TowerVerificationExplainer() {
         )
 
         ExplainerSection(
-            title = "What about towers outside the US?",
-            body = "The bundled database covers the United States (MCC 310/311). For other countries, you can download additional tower data from the Tower Database screen. Travel Mode also uses country-specific threat profiles to adjust detection sensitivity when you're abroad."
+            title = "What about towers outside the US and Canada?",
+            body = "The United States and Canada are built in. For other countries, you can download additional tower data from the Tower Database screen. Travel Mode also uses country-specific threat profiles to adjust detection sensitivity when you're abroad."
         )
 
         Spacer(modifier = Modifier.height(32.dp))
@@ -522,5 +736,14 @@ private fun TrustScoreRow(observers: String, label: String, color: Color) {
             fontWeight = FontWeight.SemiBold,
             color = color
         )
+    }
+}
+
+private fun formatBytes(bytes: Long): String {
+    if (bytes <= 0) return ""
+    return when {
+        bytes >= 1_000_000 -> "%.1f MB".format(java.util.Locale.US, bytes / 1_000_000.0)
+        bytes >= 1_000 -> "${bytes / 1_000} KB"
+        else -> "$bytes B"
     }
 }

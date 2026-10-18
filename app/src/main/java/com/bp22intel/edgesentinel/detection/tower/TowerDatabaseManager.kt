@@ -15,10 +15,13 @@ import android.content.SharedPreferences
 import com.bp22intel.edgesentinel.data.local.dao.KnownTowerDao
 import com.bp22intel.edgesentinel.data.local.entity.KnownTowerEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStream
@@ -31,19 +34,46 @@ class TowerDatabaseManager @Inject constructor(
     @ApplicationContext private val context: Context,
     private val knownTowerDao: KnownTowerDao
 ) {
+    var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    constructor(
+        context: Context,
+        knownTowerDao: KnownTowerDao,
+        ioDispatcher: CoroutineDispatcher
+    ) : this(context, knownTowerDao) {
+        this.ioDispatcher = ioDispatcher
+    }
     companion object {
-        const val BUNDLED_TOWER_DATA_VERSION = 2
+        const val BUNDLED_TOWER_DATA_VERSION = 3
         const val KEY_BUNDLED_TOWER_DATA_VERSION = "bundled_tower_data_version"
         const val PREFS_NAME = "tower_database_prefs"
+        const val BUNDLED_DATA_DATE = "2026-10-17"
 
         /**
          * Mobile Country Codes for the United States (MCC 310 to 316) bundled in us_towers.csv.gz.
          */
         val US_MCCS = (310..316).toList()
-        
+
+        /**
+         * Mobile Country Codes for Canada (MCC 302) bundled in ca_towers.csv.gz.
+         */
+        val CA_MCCS = listOf(302)
+
+        /**
+         * All MCCs owned by the bundled base data.
+         */
+        val BUNDLED_MCCS = US_MCCS + CA_MCCS
+
+        fun isBaseMcc(mcc: Int): Boolean = mcc in BUNDLED_MCCS
+
+        fun isBaseCountry(iso2: String): Boolean =
+            iso2.equals("US", ignoreCase = true) || iso2.equals("CA", ignoreCase = true)
+
         // MCC to country name mapping for UI
         val MCC_COUNTRIES = mapOf(
             310 to "United States", 311 to "United States", 312 to "United States",
+            313 to "United States", 314 to "United States", 315 to "United States",
+            316 to "United States",
             302 to "Canada",
             234 to "United Kingdom", 235 to "United Kingdom",
             262 to "Germany",
@@ -72,6 +102,8 @@ class TowerDatabaseManager @Inject constructor(
         val PRIORITY_MCCS = listOf(460, 250, 432, 424, 420, 467, 286, 602, 425, 257, 734, 414)
     }
 
+    private val autoImportMutex = Mutex()
+
     private val _importProgress = MutableStateFlow<ImportProgress?>(null)
     val importProgress: StateFlow<ImportProgress?> = _importProgress.asStateFlow()
 
@@ -94,10 +126,11 @@ class TowerDatabaseManager @Inject constructor(
 
     suspend fun getInstalledCountries(): List<CountryDatabaseInfo> {
         val installed = knownTowerDao.getInstalledCountries().toSet()
-        return MCC_COUNTRIES.map { (mcc, name) ->
+        val allMccs = (MCC_COUNTRIES.keys + installed).distinct()
+        return allMccs.map { mcc ->
             CountryDatabaseInfo(
                 mcc = mcc,
-                countryName = name,
+                countryName = MCC_COUNTRIES[mcc] ?: "MCC $mcc",
                 towerCount = if (installed.contains(mcc)) knownTowerDao.getTowerCountByCountry(mcc) else 0,
                 isInstalled = installed.contains(mcc)
             )
@@ -117,7 +150,7 @@ class TowerDatabaseManager @Inject constructor(
      * or an int (unit in full format).
      */
     suspend fun importFromCsv(inputStream: InputStream, filterMcc: Int? = null) {
-        withContext(Dispatchers.IO) {
+        withContext(ioDispatcher) {
             val reader = BufferedReader(InputStreamReader(inputStream))
             val batch = mutableListOf<KnownTowerEntity>()
             var lineCount = 0
@@ -222,8 +255,28 @@ class TowerDatabaseManager @Inject constructor(
         return prefs
     }
 
-    private fun openBundledAsset(): InputStream {
-        return assetOpener?.invoke("us_towers.csv.gz") ?: context.assets.open("us_towers.csv.gz")
+    fun getInstalledDate(iso2: String): String? {
+        val prefs = getPrefs()
+        val key = "installed_date_${iso2.uppercase()}"
+        if (prefs.contains(key)) {
+            return prefs.getString(key, null)
+        }
+        if (isBaseCountry(iso2)) {
+            return BUNDLED_DATA_DATE
+        }
+        return null
+    }
+
+    fun setInstalledDate(iso2: String, dataDate: String) {
+        getPrefs().edit().putString("installed_date_${iso2.uppercase()}", dataDate).apply()
+    }
+
+    fun removeInstalledDate(iso2: String) {
+        getPrefs().edit().remove("installed_date_${iso2.uppercase()}").apply()
+    }
+
+    private fun openBundledAsset(fileName: String = "us_towers.csv.gz"): InputStream {
+        return assetOpener?.invoke(fileName) ?: context.assets.open(fileName)
     }
 
     /**
@@ -269,56 +322,68 @@ class TowerDatabaseManager @Inject constructor(
 
     /**
      * Auto-import bundled tower data from APK assets on first launch or update.
-     * The asset is a gzipped CSV pre-filtered to high-confidence US towers (≥10 samples).
-     * If an update is available (bundled version > stored version), previous US towers
-     * (MCC 310 to 316) are removed and replaced with the updated bundle.
-     * Non-US towers imported for other countries are preserved.
+     * The bundle owns MCCs 310 to 316 (US) and 302 (CA).
+     * If an update is available (bundled version > stored version), previous bundle-owned
+     * towers are removed and replaced with the updated bundle.
+     * Non-base towers imported for other countries are preserved.
+     * Guarded with a Mutex to ensure single-flight execution.
      */
     suspend fun autoImportBundledData() {
-        withContext(Dispatchers.IO) {
-            val prefs = getPrefs()
-            val totalTowers = knownTowerDao.getTowerCount()
-            val storedVersion = if (prefs.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) {
-                prefs.getInt(KEY_BUNDLED_TOWER_DATA_VERSION, 0)
-            } else if (totalTowers > 0) {
-                // An existing install with towers loaded but no stored version counts as version 1
-                1
-            } else {
-                0
-            }
+        autoImportMutex.withLock {
+            withContext(ioDispatcher) {
+                val prefs = getPrefs()
+                val totalTowers = knownTowerDao.getTowerCount()
+                val storedVersion = if (prefs.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) {
+                    prefs.getInt(KEY_BUNDLED_TOWER_DATA_VERSION, 0)
+                } else if (totalTowers > 0) {
+                    // An existing install with towers loaded but no stored version counts as version 1
+                    1
+                } else {
+                    0
+                }
 
-            if (storedVersion >= BUNDLED_TOWER_DATA_VERSION) {
-                logD(
-                    "TowerDB",
-                    "Bundled tower database is up to date (version $storedVersion), skipping auto-import"
-                )
-                return@withContext
-            }
+                if (storedVersion >= BUNDLED_TOWER_DATA_VERSION) {
+                    logD(
+                        "TowerDB",
+                        "Bundled tower database is up to date (version $storedVersion), skipping auto-import"
+                    )
+                    return@withContext
+                }
 
-            try {
-                logD(
-                    "TowerDB",
-                    "Auto-importing bundled US tower database (current=$storedVersion, target=$BUNDLED_TOWER_DATA_VERSION)..."
-                )
-                val assetStream = openBundledAsset()
-                val gzipStream = java.util.zip.GZIPInputStream(java.io.BufferedInputStream(assetStream))
+                try {
+                    logD(
+                        "TowerDB",
+                        "Auto-importing bundled tower database (current=$storedVersion, target=$BUNDLED_TOWER_DATA_VERSION)..."
+                    )
+                    // Delete only bundle-owned rows (US 310 to 316 and CA 302).
+                    // Do not delete towers the user imported for other countries.
+                    knownTowerDao.deleteTowersByCountries(BUNDLED_MCCS)
 
-                // Delete only US rows previously imported from bundle (MCC 310 to 316).
-                // Do not delete towers the user imported for other countries.
-                knownTowerDao.deleteTowersByCountries(US_MCCS)
+                    // Import US towers
+                    val usStream = openBundledAsset("us_towers.csv.gz")
+                    val usGzipStream = java.util.zip.GZIPInputStream(java.io.BufferedInputStream(usStream))
+                    importFromCsv(usGzipStream, null)
 
-                // The bundled CSV has slim format: radio,mcc,mnc,lac,cid,lon,lat,range,samples
-                importFromCsv(gzipStream, null)
+                    // Import Canada towers
+                    val caStream = openBundledAsset("ca_towers.csv.gz")
+                    val caGzipStream = java.util.zip.GZIPInputStream(java.io.BufferedInputStream(caStream))
+                    importFromCsv(caGzipStream, null)
 
-                // Crash-safe: write the new version only after the import completes successfully
-                prefs.edit().putInt(KEY_BUNDLED_TOWER_DATA_VERSION, BUNDLED_TOWER_DATA_VERSION).apply()
-                logD(
-                    "TowerDB",
-                    "Auto-import complete: ${knownTowerDao.getTowerCount()} towers (version $BUNDLED_TOWER_DATA_VERSION)"
-                )
-            } catch (e: Exception) {
-                logE("TowerDB", "Auto-import from assets failed", e)
-                throw e
+                    // Crash-safe: write the new version and dates only after both imports complete successfully
+                    prefs.edit()
+                        .putInt(KEY_BUNDLED_TOWER_DATA_VERSION, BUNDLED_TOWER_DATA_VERSION)
+                        .putString("installed_date_US", BUNDLED_DATA_DATE)
+                        .putString("installed_date_CA", BUNDLED_DATA_DATE)
+                        .apply()
+
+                    logD(
+                        "TowerDB",
+                        "Auto-import complete: ${knownTowerDao.getTowerCount()} towers (version $BUNDLED_TOWER_DATA_VERSION)"
+                    )
+                } catch (e: Exception) {
+                    logE("TowerDB", "Auto-import from assets failed", e)
+                    throw e
+                }
             }
         }
     }
@@ -347,6 +412,14 @@ class TowerDatabaseManager @Inject constructor(
     }
 
     suspend fun deleteCountry(mcc: Int) {
+        if (isBaseMcc(mcc)) return // Base countries are not removable
         knownTowerDao.deleteTowersByCountry(mcc)
+    }
+
+    suspend fun deleteCountries(mccs: List<Int>) {
+        val nonBase = mccs.filterNot { isBaseMcc(it) }
+        if (nonBase.isNotEmpty()) {
+            knownTowerDao.deleteTowersByCountries(nonBase)
+        }
     }
 }
