@@ -163,10 +163,12 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
         // N8: if no cell reports isRegistered (some OEMs, CDMA path), pick the
         // cell with the strongest signal and the highest RAT rank.
         val servingCell = cells.firstOrNull { it.isRegistered }
-            ?: cells.maxWith(
+            // D6: skip cells whose signal is unavailable/sentinel.
+            ?: cells.filter { isUsableSignal(it.signalStrength) }.maxWithOrNull(
                 compareBy<CellTower> { it.signalStrength }
                     .thenBy { GENERATION_RANK[it.networkType] ?: -1 }
             )
+            ?: cells.maxBy { GENERATION_RANK[it.networkType] ?: -1 }
         val servingRank = GENERATION_RANK[servingCell.networkType] ?: -1
 
         try {
@@ -580,4 +582,7 @@ class NetworkDowngradeDetector @Inject constructor() : ThreatDetector {
         DOMESTIC_UNUSUAL_TAC,
         UNKNOWN
     }
+
+    /** D6: CellInfo.UNAVAILABLE (Int.MAX_VALUE), Int.MIN_VALUE, 0 and positive values are not real dBm. */
+    internal fun isUsableSignal(dbm: Int): Boolean = dbm in -160..-1
 }

@@ -61,7 +61,7 @@ class TravelExporter(private val context: Context) {
         try { android.util.Log.w(TAG, "Export gather failed: $msg", e) } catch (_: Throwable) {}
     }
 
-    private fun deriveKey(passphrase: String, salt: ByteArray): SecretKeySpec {
+    internal fun deriveKey(passphrase: String, salt: ByteArray): SecretKeySpec {
         val chars = passphrase.toCharArray()
         val spec = PBEKeySpec(chars, salt, PBKDF2_ITERATIONS, AES_KEY_SIZE)
         try {
@@ -252,6 +252,7 @@ class TravelExporter(private val context: Context) {
         // Encrypt with AES-256-GCM
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
+        cipher.updateAAD(FILE_HEADER) // D5: bind the format header
         val ciphertext = cipher.doFinal(data)
 
         // Combine: header + salt + iv + ciphertext (includes GCM tag)
@@ -275,6 +276,7 @@ class TravelExporter(private val context: Context) {
 
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_LENGTH, iv))
+        cipher.updateAAD(encryptedData, 0, h) // D5: header is authenticated
         return cipher.doFinal(ciphertext)
     }
 

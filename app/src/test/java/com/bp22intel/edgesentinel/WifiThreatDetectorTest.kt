@@ -15,7 +15,7 @@ class WifiThreatDetectorTest {
     private val dao = Proxy.newProxyInstance(
         TrustedNetworkDao::class.java.classLoader, arrayOf(TrustedNetworkDao::class.java)
     ) { _, _, _ -> throw UnsupportedOperationException("not used") } as TrustedNetworkDao
-    private val detector = WifiThreatDetector(dao)
+    private val detector = WifiThreatDetector(dao, InMemorySightingDao())
 
     private fun ap(bssid: String, ssid: String, sec: SecurityType, sig: Int = -70, freq: Int = 2437) =
         ObservedAp(bssid = bssid, ssid = ssid, signalStrength = sig, frequency = freq,
@@ -35,8 +35,7 @@ class WifiThreatDetectorTest {
         assertTrue(et.first().details.containsKey("security_mismatch"))
     }
 
-    // Round 2 (NF3/N5): a BSSID is known only after >= 3 separate scans over
-    // >= 24 h, so the stable history now spans 48 h instead of three scans at "now".
+    // Round 4 (D2): a BSSID is known after >= 3 scans across >= 2 sessions.
     @Test fun stableMultiApSsidDoesNotFire() {
         val now = System.currentTimeMillis()
         val h = 60L * 60 * 1000
@@ -89,15 +88,16 @@ class WifiThreatDetectorTest {
         assertFalse(results.any { it.threatType == WifiThreatType.EVIL_TWIN })
     }
 
-    @Test fun bssidSeenInThreeScansUnder24hStillFires() {
+    // Round 4 (D2): 3 scans within ONE session (15 s apart) are not established.
+    @Test fun bssidSeenInThreeScansInOneSessionStillFires() {
         val now = System.currentTimeMillis()
         val corpC = ap("aa:aa:aa:aa:aa:03", "CorpNet", SecurityType.WPA2)
         val history = established(now, corpA, corpB) + listOf(
-            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 3 * h + 1),
-            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 2 * h + 2),
-            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 1 * h + 3))
+            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 45_000),
+            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 30_000),
+            WifiScanSnapshot(listOf(corpA, corpB, corpC), now - 15_000))
         val results = detector.analyze(WifiScanSnapshot(listOf(corpA, corpB, corpC), now), history)
-        assertTrue("3 scans over only 2 h is not established",
+        assertTrue("3 scans in a single session is not established",
             results.any { it.threatType == WifiThreatType.EVIL_TWIN })
     }
 

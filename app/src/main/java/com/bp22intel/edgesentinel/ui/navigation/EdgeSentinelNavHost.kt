@@ -222,7 +222,9 @@ fun EdgeSentinelNavHost(initialAlertId: Long? = null) {
                 val checkedItems by viewModel.checkedItems.collectAsState()
                 val exportError by viewModel.exportError.collectAsState()
                 val wipeError by viewModel.wipeError.collectAsState()
+                val isWiping by viewModel.isWiping.collectAsState()
                 TravelModeScreen(
+                    isWiping = isWiping,
                     exportError = exportError,
                     wipeError = wipeError,
                     onDismissWipeError = viewModel::acknowledgeWipeError,

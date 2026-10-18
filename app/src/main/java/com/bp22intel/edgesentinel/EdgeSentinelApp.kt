@@ -54,6 +54,8 @@ class EdgeSentinelApp : Application(), Configuration.Provider {
 
         // Enqueue periodic backup scan worker (runs only if foreground service is dead)
         // N4: not after a panic wipe (auto-start disabled until Settings re-enables it).
+        // D1: the post-wipe suppression applies to this launch only.
+        com.bp22intel.edgesentinel.service.MonitoringService.consumePanicSuppression(this)
         if (!com.bp22intel.edgesentinel.service.MonitoringService.isAutoStartDisabled(this)) {
             ScanWorker.enqueue(this)
         }

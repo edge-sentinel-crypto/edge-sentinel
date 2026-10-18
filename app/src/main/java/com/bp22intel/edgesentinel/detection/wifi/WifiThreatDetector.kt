@@ -10,7 +10,9 @@
 
 package com.bp22intel.edgesentinel.detection.wifi
 
+import com.bp22intel.edgesentinel.data.local.dao.BssidSightingDao
 import com.bp22intel.edgesentinel.data.local.dao.TrustedNetworkDao
+import com.bp22intel.edgesentinel.data.local.entity.BssidSightingEntity
 import com.bp22intel.edgesentinel.domain.model.Confidence
 import com.bp22intel.edgesentinel.domain.model.WifiThreatType
 import javax.inject.Inject
@@ -42,7 +44,8 @@ data class WifiDetectionResult(
  */
 @Singleton
 class WifiThreatDetector @Inject constructor(
-    private val trustedNetworkDao: TrustedNetworkDao
+    private val trustedNetworkDao: TrustedNetworkDao,
+    private val sightingDao: BssidSightingDao
 ) {
 
     companion object {
@@ -52,8 +55,20 @@ class WifiThreatDetector @Inject constructor(
          */
         const val MIN_BSSID_SIGHTINGS = 3
 
-        /** ... spread over at least this long (first sighting to latest sighting). */
-        const val MIN_BSSID_ESTABLISHED_MS = 24L * 60 * 60 * 1000
+        /**
+         * Round 4 (D2): ... in at least this many separate sessions. The old
+         * 24 h span could never be met (in-memory store, 15 min history).
+         */
+        const val MIN_BSSID_SESSIONS = 2
+
+        /**
+         * A new session starts when the scan comes from a different process
+         * (see [PROCESS_SESSION_ID]) or after this long without a sighting.
+         */
+        const val SESSION_GAP_MS = 30L * 60 * 1000
+
+        /** Identifies this process; a process restart is a new session. */
+        val PROCESS_SESSION_ID: Long = System.currentTimeMillis() xor System.nanoTime()
 
         /** Bound the per-BSSID record store. */
         private const val MAX_BSSID_RECORDS = 5_000
@@ -172,11 +187,67 @@ class WifiThreatDetector @Inject constructor(
         var sightings: Int,
         var securityType: SecurityType,
         /** Timestamp of the last scan counted, so each scan counts once. */
-        var lastCountedScan: Long
+        var lastCountedScan: Long,
+        var sessions: Int = 1,
+        var lastSessionId: Long = 0L
     )
 
-    /** Keyed by "ssid\u0000bssid". In-memory; survives across scans in this process. */
+    /**
+     * Keyed by "ssid\u0000bssid". Round 4 (D2): mirrored to the Room table
+     * `wifi_bssid_sightings` ([loadPersistedSightings]/[persistSightings]), so
+     * it survives process restarts. Panic wipe deletes the table.
+     */
     private val bssidRecords = HashMap<String, BssidRecord>()
+    private val dirtyKeys = HashSet<String>()
+    private val removedKeys = HashSet<String>()
+    @Volatile private var loaded = false
+
+    /** Session id used for new sightings. Tests set it to simulate a process restart. */
+    @Volatile internal var sessionId: Long = PROCESS_SESSION_ID
+
+    /** D2: loads the persisted records once per process. Failures leave the in-memory store as is. */
+    suspend fun loadPersistedSightings() {
+        if (loaded) return
+        val rows = try { sightingDao.getAll() } catch (e: Exception) { return }
+        synchronized(bssidRecords) {
+            for (r in rows) {
+                if (bssidRecords.containsKey(r.recordKey)) continue
+                val sec = SecurityType.values().firstOrNull { it.name == r.securityType } ?: SecurityType.UNKNOWN
+                bssidRecords[r.recordKey] = BssidRecord(
+                    r.firstSeen, r.lastSeen, r.sightings, sec, r.lastCountedScan, r.sessions, r.lastSessionId
+                )
+            }
+            loaded = true
+        }
+    }
+
+    /** D2: writes changed records and deletes pruned ones. Errors keep them dirty for the next try. */
+    suspend fun persistSightings() {
+        val (upserts, removals) = synchronized(bssidRecords) {
+            val ups = dirtyKeys.mapNotNull { k ->
+                val r = bssidRecords[k] ?: return@mapNotNull null
+                val sep = k.indexOf('\u0000')
+                BssidSightingEntity(
+                    recordKey = k, ssid = k.substring(0, sep), bssid = k.substring(sep + 1),
+                    firstSeen = r.firstSeen, lastSeen = r.lastSeen, sightings = r.sightings,
+                    sessions = r.sessions, securityType = r.securityType.name,
+                    lastCountedScan = r.lastCountedScan, lastSessionId = r.lastSessionId
+                )
+            }
+            val rem = removedKeys.toList()
+            dirtyKeys.clear(); removedKeys.clear()
+            ups to rem
+        }
+        try {
+            if (removals.isNotEmpty()) removals.chunked(500).forEach { sightingDao.deleteKeys(it) }
+            if (upserts.isNotEmpty()) sightingDao.upsertAll(upserts)
+        } catch (e: Exception) {
+            synchronized(bssidRecords) {
+                upserts.forEach { dirtyKeys.add(it.recordKey) }
+                removedKeys.addAll(removals)
+            }
+        }
+    }
 
     private fun recordKey(ssid: String, bssid: String) = ssid + "\u0000" + bssid
 
@@ -188,38 +259,44 @@ class WifiThreatDetector @Inject constructor(
             val key = recordKey(ap.ssid, ap.bssid.lowercase())
             val rec = bssidRecords[key]
             if (rec == null) {
-                bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts)
+                bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts, 1, sessionId)
+                dirtyKeys.add(key); removedKeys.remove(key)
             } else if (ts > rec.lastCountedScan) {
+                val newSession = rec.lastSessionId != sessionId || ts - rec.lastSeen >= SESSION_GAP_MS
                 rec.sightings += 1
+                if (newSession) rec.sessions += 1
+                rec.lastSessionId = sessionId
                 rec.lastCountedScan = ts
                 if (ts > rec.lastSeen) rec.lastSeen = ts
                 if (rec.securityType != ap.securityType) {
                     // Security changed for this BSSID: restart its record.
-                    bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts)
+                    bssidRecords[key] = BssidRecord(ts, ts, 1, ap.securityType, ts, 1, sessionId)
                 }
+                dirtyKeys.add(key)
             }
         }
     }
 
     private fun pruneRecords(now: Long) {
-        bssidRecords.entries.removeAll { now - it.value.lastSeen > BSSID_RECORD_TTL_MS }
+        val expired = bssidRecords.filterValues { now - it.lastSeen > BSSID_RECORD_TTL_MS }.keys.toList()
+        expired.forEach { bssidRecords.remove(it); dirtyKeys.remove(it); removedKeys.add(it) }
         if (bssidRecords.size > MAX_BSSID_RECORDS) {
             bssidRecords.entries.sortedBy { it.value.lastSeen }
                 .take(bssidRecords.size - MAX_BSSID_RECORDS)
                 .map { it.key }
-                .forEach { bssidRecords.remove(it) }
+                .forEach { bssidRecords.remove(it); dirtyKeys.remove(it); removedKeys.add(it) }
         }
     }
 
     /**
      * True when [ap] is an established BSSID for its SSID: seen in at least
-     * [MIN_BSSID_SIGHTINGS] separate prior scans over at least
-     * [MIN_BSSID_ESTABLISHED_MS], with the same security type as now.
+     * [MIN_BSSID_SIGHTINGS] separate prior scans across at least
+     * [MIN_BSSID_SESSIONS] sessions, with the same security type as now.
      */
     private fun isEstablished(ap: ObservedAp): Boolean {
         val rec = bssidRecords[recordKey(ap.ssid, ap.bssid.lowercase())] ?: return false
         return rec.sightings >= MIN_BSSID_SIGHTINGS &&
-            rec.lastSeen - rec.firstSeen >= MIN_BSSID_ESTABLISHED_MS &&
+            rec.sessions >= MIN_BSSID_SESSIONS &&
             rec.securityType == ap.securityType
     }
 
@@ -261,8 +338,8 @@ class WifiThreatDetector @Inject constructor(
             }
 
             // NF3/N5: skip only when EVERY current BSSID is individually
-            // established for this SSID (>= MIN_BSSID_SIGHTINGS scans over
-            // >= 24 h, same security). A new or not-yet-established BSSID, or
+            // established for this SSID (>= MIN_BSSID_SIGHTINGS scans across
+            // >= MIN_BSSID_SESSIONS sessions, same security). A new or not-yet-established BSSID, or
             // one whose security changed, fires.
             val allEstablished = synchronized(bssidRecords) {
                 aps.distinctBy { it.bssid.lowercase() }.all { isEstablished(it) }

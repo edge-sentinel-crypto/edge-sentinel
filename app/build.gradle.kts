@@ -36,8 +36,8 @@ android {
         applicationId = "com.bp22intel.edgesentinel"
         minSdk = 26
         targetSdk = 35
-        versionCode = 93
-        versionName = "2.0.93"
+        versionCode = 97
+        versionName = "2.0.97"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -156,6 +156,8 @@ dependencies {
     // Room - Local Database
     implementation(libs.room.runtime)
     implementation(libs.room.ktx)
+    implementation("androidx.sqlite:sqlite:2.4.0")
+    implementation("androidx.sqlite:sqlite-framework:2.4.0")
     ksp(libs.room.compiler)
 
     // WorkManager - Background Processing

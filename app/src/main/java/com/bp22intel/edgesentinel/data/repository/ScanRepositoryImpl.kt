@@ -17,6 +17,7 @@ import com.bp22intel.edgesentinel.domain.model.ScanResult
 import com.bp22intel.edgesentinel.domain.repository.ScanRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import com.bp22intel.edgesentinel.data.WipeInProgress
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,9 +26,10 @@ class ScanRepositoryImpl @Inject constructor(
     private val scanDao: ScanDao
 ) : ScanRepository {
 
-    override suspend fun insertScan(scan: ScanResult): Long =
+    override suspend fun insertScan(scan: ScanResult): Long = WipeInProgress.access {
         scanDao.insert(scan.toEntity())
+    }
 
     override fun getRecentScans(limit: Int): Flow<List<ScanResult>> =
-        scanDao.getRecent(limit).map { entities -> entities.map { it.toDomain() } }
+        WipeInProgress.guard(scanDao.getRecent(limit).map { entities -> entities.map { it.toDomain() } })
 }

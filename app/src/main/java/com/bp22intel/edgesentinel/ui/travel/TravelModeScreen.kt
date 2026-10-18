@@ -10,6 +10,7 @@
 
 package com.bp22intel.edgesentinel.ui.travel
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -42,6 +43,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -65,8 +67,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.bp22intel.edgesentinel.travel.AdvicePriority
 import com.bp22intel.edgesentinel.travel.ChecklistCategory
 import com.bp22intel.edgesentinel.travel.ChecklistItem
@@ -93,6 +98,7 @@ import com.bp22intel.edgesentinel.ui.theme.TextTertiary
 fun TravelModeScreen(
     travelState: TravelModeState = TravelModeState(),
     checkedItems: Set<String> = emptySet(),
+    isWiping: Boolean = false,
     onBack: () -> Unit = {},
     onActivate: () -> Unit = {},
     onDeactivate: () -> Unit = {},
@@ -112,6 +118,47 @@ fun TravelModeScreen(
 
     val isActive = travelState.state != TravelState.INACTIVE
     val profile = travelState.threatProfile
+
+    if (isWiping) {
+        BackHandler(enabled = true) {}
+        Dialog(
+            onDismissRequest = {},
+            properties = DialogProperties(
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+                usePlatformDefaultWidth = false
+            )
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(BackgroundPrimary),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                    modifier = Modifier.padding(24.dp)
+                ) {
+                    CircularProgressIndicator(color = StatusThreat)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = "Wiping…",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Permanently erasing all data. Please do not close the app.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            }
+        }
+    }
 
     if (showPanicConfirm) {
         PanicWipeConfirmDialog(

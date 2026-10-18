@@ -71,6 +71,10 @@ does not require any Edge Sentinel backend.
 - Several advanced features are root-only or stubbed (see "What it does NOT do").
 - This is research-grade software, not a certified security product.
 
+## Known limitations
+
+A rogue access point that copies a trusted network's name and security can become 'known' after it is seen in 3 scans across 2 sessions. A session is an app restart or a gap of 30 minutes or more. Edge Sentinel raises 1 to 3 alerts before that happens. After that, the access point is silent for up to 30 days. If you marked the network as trusted in Edge Sentinel, a copy with the same security raises no evil-twin alert at all; only a security mismatch triggers an alert. Treat any evil-twin alert on a trusted network as serious, even if it stops repeating.
+
 ## Build
 
 Requirements: JDK 17, Android SDK (compileSdk 35, build-tools 34/35), Android

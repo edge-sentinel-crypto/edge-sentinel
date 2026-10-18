@@ -17,6 +17,7 @@ import com.bp22intel.edgesentinel.domain.model.CellTower
 import com.bp22intel.edgesentinel.domain.repository.CellRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import com.bp22intel.edgesentinel.data.WipeInProgress
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -25,16 +26,18 @@ class CellRepositoryImpl @Inject constructor(
     private val cellDao: CellDao
 ) : CellRepository {
 
-    override suspend fun insertOrUpdateCell(cell: CellTower) {
+    override suspend fun insertOrUpdateCell(cell: CellTower): Unit = WipeInProgress.access {
         cellDao.insert(cell.toEntity())
     }
 
     override fun getAllCells(): Flow<List<CellTower>> =
-        cellDao.getAll().map { entities -> entities.map { it.toDomain() } }
+        WipeInProgress.guard(cellDao.getAll().map { entities -> entities.map { it.toDomain() } })
 
-    override suspend fun getCellByCid(cid: Int): CellTower? =
+    override suspend fun getCellByCid(cid: Int): CellTower? = WipeInProgress.access {
         cellDao.getByCid(cid)?.toDomain()
+    }
 
-    override suspend fun getKnownCellsForLac(lacTac: Int): List<CellTower> =
+    override suspend fun getKnownCellsForLac(lacTac: Int): List<CellTower> = WipeInProgress.access {
         cellDao.getByLacTac(lacTac).map { it.toDomain() }
+    }
 }

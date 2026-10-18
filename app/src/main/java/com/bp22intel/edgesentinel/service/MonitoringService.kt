@@ -14,6 +14,7 @@ import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.os.BatteryManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
@@ -47,7 +48,12 @@ import com.bp22intel.edgesentinel.notification.NotificationChannels
 import com.bp22intel.edgesentinel.sensor.MotionDetector
 import com.bp22intel.edgesentinel.sensor.MotionState
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.joinAll
+import com.bp22intel.edgesentinel.data.WipeInProgress
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -94,6 +100,8 @@ class MonitoringService : LifecycleService() {
     private var wifiJob: Job? = null
     private var bleJob: Job? = null
     private var networkJob: Job? = null
+    /** True between startMonitoring and stopMonitoring for this instance. */
+    private var monitoringActive = false
     private lateinit var notificationManager: NotificationManager
 
     /** Timestamp of the most recent alert, used for adaptive interval logic. */
@@ -129,6 +137,12 @@ class MonitoringService : LifecycleService() {
         private val _threatLevel = MutableStateFlow(ThreatLevel.CLEAR)
         val threatLevel: StateFlow<ThreatLevel> = _threatLevel.asStateFlow()
 
+        /**
+         * Scope for the stop sequence. It is not tied to the service lifecycle,
+         * so the join + flush still completes after onDestroy cancels lifecycleScope.
+         */
+        private val stopScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
         private val _isRunning = MutableStateFlow(false)
         val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
 
@@ -163,13 +177,12 @@ class MonitoringService : LifecycleService() {
             val stopped = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
                 isRunning.first { !it }
             } != null
-            kotlinx.coroutines.delay(STOP_GRACE_MS)
+            // isRunning turns false only after every job (and the flush) has completed.
             return stopped
         }
 
         private const val AUTOSTART_PREFS = "monitoring_autostart"
         private const val KEY_AUTOSTART_DISABLED = "auto_start_disabled"
-        private const val STOP_GRACE_MS = 750L
 
         /**
          * N4: persistent auto-start switch. Panic wipe sets it, so neither
@@ -177,13 +190,67 @@ class MonitoringService : LifecycleService() {
          * Enabling monitoring in Settings clears it.
          */
         fun setAutoStartDisabled(context: Context, disabled: Boolean) {
+            if (!disabled) suppressedThisProcess = false
             context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_AUTOSTART_DISABLED, disabled).commit()
+                .edit().putBoolean(KEY_AUTOSTART_DISABLED, disabled).apply()
         }
 
-        fun isAutoStartDisabled(context: Context): Boolean =
+        private const val KEY_PANIC_SUPPRESS = "panic_suppress_next_launch"
+        @Volatile private var suppressedThisProcess = false
+
+        /** D1: panic wipe suppresses auto-start for the NEXT launch only. Persisted synchronously on IO before exit. */
+        fun markPanicWipeSuppression(context: Context) {
             context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
-                .getBoolean(KEY_AUTOSTART_DISABLED, false)
+                .edit().putBoolean(KEY_PANIC_SUPPRESS, true).commit()
+        }
+
+        /**
+         * D1: called once from Application.onCreate. Moves the one-shot panic
+         * suppression into this process and clears the persisted flag, so the
+         * launch after the wipe does not auto-start but later launches do.
+         */
+        fun consumePanicSuppression(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
+            if (!prefs.getBoolean(KEY_PANIC_SUPPRESS, false)) return false
+            suppressedThisProcess = true
+            prefs.edit().remove(KEY_PANIC_SUPPRESS).apply()
+            return true
+        }
+
+        /** D1: the user started monitoring (Dashboard). Clears every auto-start block. */
+        fun clearAutoStartSuppression(context: Context) {
+            suppressedThisProcess = false
+            context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_AUTOSTART_DISABLED, false).remove(KEY_PANIC_SUPPRESS).apply()
+        }
+
+        fun isAutoStartDisabled(context: Context): Boolean {
+            if (suppressedThisProcess) return true
+            val prefs = try {
+                context.getSharedPreferences(AUTOSTART_PREFS, Context.MODE_PRIVATE)
+            } catch (_: Throwable) { null }
+            return prefs?.getBoolean(KEY_AUTOSTART_DISABLED, false) == true ||
+                   prefs?.getBoolean(KEY_PANIC_SUPPRESS, false) == true
+        }
+
+        fun resetForTests() {
+            suppressedThisProcess = false
+        }
+    }
+
+    internal var stopSelfCalled = false
+    internal var testContext: Context? = null
+
+    override fun getSharedPreferences(name: String, mode: Int): SharedPreferences {
+        testContext?.let { return it.getSharedPreferences(name, mode) }
+        return super.getSharedPreferences(name, mode)
+    }
+
+    internal fun performStopSelf() {
+        stopSelfCalled = true
+        try {
+            stopSelf()
+        } catch (_: Throwable) {}
     }
 
     override fun onCreate() {
@@ -192,13 +259,22 @@ class MonitoringService : LifecycleService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        super.onStartCommand(intent, flags, startId)
+        // V4: when the system restarts MonitoringService with a null intent (START_STICKY),
+        // honor the post-wipe auto-start suppression so monitoring does not restart.
+        if (intent == null && isAutoStartDisabled(this)) {
+            performStopSelf()
+            return START_NOT_STICKY
+        }
+
+        try {
+            super.onStartCommand(intent, flags, startId)
+        } catch (_: Throwable) {}
 
         when (intent?.action) {
             ACTION_STOP -> {
                 stopMonitoring()
                 stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
+                performStopSelf()
                 return START_NOT_STICKY
             }
             else -> {
@@ -216,6 +292,10 @@ class MonitoringService : LifecycleService() {
     }
 
     private fun startMonitoring() {
+        // Panic wipe in progress: never start writers again in this process.
+        if (WipeInProgress.isActive) { stopSelf(); return }
+        if (monitoringActive) return
+        monitoringActive = true
         _isRunning.value = true
         telephonyMonitor.start()
         motionDetector.start()
@@ -279,20 +359,24 @@ class MonitoringService : LifecycleService() {
     }
 
     private fun stopMonitoring() {
-        // Flush tower position estimates to disk before stopping
-        lifecycleScope.launch {
-            try { towerPositionTracker.flushToDisk() } catch (_: Exception) {}
-        }
-        _isRunning.value = false
+        if (!monitoringActive) return
+        monitoringActive = false
         _threatLevel.value = ThreatLevel.CLEAR
-        scanJob?.cancel()
+        val jobs = listOfNotNull(scanJob, wifiJob, bleJob, networkJob)
+        jobs.forEach { it.cancel() }
         scanJob = null
-        wifiJob?.cancel()
         wifiJob = null
-        bleJob?.cancel()
         bleJob = null
-        networkJob?.cancel()
         networkJob = null
+        // Defect 1: report "stopped" only after every writer job has completed
+        // and the flush (skipped during a panic wipe) has finished.
+        stopScope.launch {
+            try { jobs.joinAll() } catch (_: Exception) {}
+            if (!WipeInProgress.isActive) {
+                try { towerPositionTracker.flushToDisk() } catch (_: Exception) {}
+            }
+            _isRunning.value = false
+        }
         telephonyMonitor.stop()
         motionDetector.stop()
         bleTrackingDetector.stopScanning()
@@ -310,9 +394,11 @@ class MonitoringService : LifecycleService() {
                     val history = wifiMonitor.getHistory()
                     val trustedBssids = trustedNetworkDao.getAllTrustedBssids().toSet()
                     val trustedSsids = trustedNetworkDao.getAllTrustedSsids().toSet()
+                    wifiThreatDetector.loadPersistedSightings() // D2
                     val results = wifiThreatDetector.analyze(
                         snapshot, history, emptyList(), trustedBssids, trustedSsids
                     )
+                    wifiThreatDetector.persistSightings() // D2
                     val now = System.currentTimeMillis()
                     val fusionDetections = results.map { result ->
                         com.bp22intel.edgesentinel.fusion.ActiveDetection(

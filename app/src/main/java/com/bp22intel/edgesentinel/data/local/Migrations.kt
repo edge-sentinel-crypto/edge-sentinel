@@ -180,6 +180,20 @@ object Migrations {
         }
     }
 
+    /** Round 4 (D2): persisted per-(SSID, BSSID) Wi-Fi sighting records. DDL matches 10.json. */
+    const val CREATE_WIFI_BSSID_SIGHTINGS_V10 =
+        "CREATE TABLE IF NOT EXISTS `wifi_bssid_sightings` (`record_key` TEXT NOT NULL, " +
+            "`ssid` TEXT NOT NULL, `bssid` TEXT NOT NULL, `first_seen` INTEGER NOT NULL, " +
+            "`last_seen` INTEGER NOT NULL, `sightings` INTEGER NOT NULL, `sessions` INTEGER NOT NULL, " +
+            "`security_type` TEXT NOT NULL, `last_counted_scan` INTEGER NOT NULL, " +
+            "`last_session_id` INTEGER NOT NULL, PRIMARY KEY(`record_key`))"
+
+    val MIGRATION_9_10 = object : Migration(9, 10) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(CREATE_WIFI_BSSID_SIGHTINGS_V10)
+        }
+    }
+
     /** All migrations, in order, for registration with the Room builder. */
     val ALL: Array<Migration> = arrayOf(
         MIGRATION_1_2,
@@ -189,6 +203,7 @@ object Migrations {
         MIGRATION_5_6,
         MIGRATION_6_7,
         MIGRATION_7_8,
-        MIGRATION_8_9
+        MIGRATION_8_9,
+        MIGRATION_9_10
     )
 }

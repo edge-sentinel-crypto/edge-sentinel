@@ -71,25 +71,28 @@ class ScanWorker @AssistedInject constructor(
         /**
          * N3: cancels the unique work, waits for WorkManager to record the
          * cancel, then waits until no instance is RUNNING (bounded by [timeoutMs]).
+         * Returns false on timeout; the caller must record it.
          * Blocking; call from Dispatchers.IO.
          */
-        fun cancelAndAwait(context: Context, timeoutMs: Long) {
+        fun cancelAndAwait(context: Context, timeoutMs: Long): Boolean {
             val wm = WorkManager.getInstance(context)
             val deadline = System.currentTimeMillis() + timeoutMs
             wm.cancelUniqueWork(UNIQUE_WORK_NAME).result.get(timeoutMs, TimeUnit.MILLISECONDS)
             while (System.currentTimeMillis() < deadline) {
                 val infos = wm.getWorkInfosForUniqueWork(UNIQUE_WORK_NAME)
                     .get(timeoutMs, TimeUnit.MILLISECONDS)
-                if (infos.none { it.state == androidx.work.WorkInfo.State.RUNNING }) return
+                if (infos.none { it.state == androidx.work.WorkInfo.State.RUNNING }) return true
                 Thread.sleep(100)
             }
+            return false
         }
     }
 
     override suspend fun doWork(): Result {
         // Skip if the foreground MonitoringService is already running —
         // it handles scanning on its own schedule.
-        if (MonitoringService.isRunning.value) {
+        if (MonitoringService.isRunning.value ||
+            com.bp22intel.edgesentinel.data.WipeInProgress.isActive) {
             return Result.success()
         }
 

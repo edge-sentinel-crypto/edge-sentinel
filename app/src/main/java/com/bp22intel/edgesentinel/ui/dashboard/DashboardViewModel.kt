@@ -198,6 +198,9 @@ class DashboardViewModel @Inject constructor(
             MonitoringService.stop(context)
         } else {
             _monitoringStartTime.value = System.currentTimeMillis()
+            // D1: an explicit start clears the post-wipe auto-start block.
+            MonitoringService.clearAutoStartSuppression(context)
+            com.bp22intel.edgesentinel.service.ScanWorker.enqueue(context)
             MonitoringService.start(context)
         }
     }

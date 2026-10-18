@@ -29,6 +29,9 @@ import dagger.Provides
 import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import javax.inject.Singleton
 
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -53,8 +56,19 @@ object AppModule {
          // NOTE: fallbackToDestructiveMigration() was intentionally removed.
          // A missing migration must now fail loudly (IllegalStateException) in
          // QA instead of silently wiping all user data on upgrade.
+         // Round 4 (D4): one choke point for every DAO. While a panic wipe
+         // runs, no DAO (repository or direct) can open or re-create the DB.
+         .openHelperFactory(
+             com.bp22intel.edgesentinel.data.WipeGuardOpenHelperFactory(
+                 androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory()
+             )
+         )
          .build()
     }
+
+    @Provides
+    fun provideBssidSightingDao(db: EdgeSentinelDatabase): com.bp22intel.edgesentinel.data.local.dao.BssidSightingDao =
+        db.bssidSightingDao()
 
     @Provides
     fun provideCellDao(db: EdgeSentinelDatabase): CellDao = db.cellDao()
@@ -98,5 +112,19 @@ object AppModule {
         @ApplicationContext context: Context
     ): DataStore<Preferences> {
         return context.dataStore
+    }
+
+    @Provides
+    @Singleton
+    fun provideApplicationScope(): CoroutineScope {
+        return CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    }
+
+    @Provides
+    @Singleton
+    fun provideProcessRestarter(
+        @ApplicationContext context: Context
+    ): com.bp22intel.edgesentinel.travel.ProcessRestarter {
+        return com.bp22intel.edgesentinel.travel.DefaultProcessRestarter(context)
     }
 }

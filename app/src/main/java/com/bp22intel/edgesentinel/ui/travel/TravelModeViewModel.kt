@@ -21,18 +21,27 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.bp22intel.edgesentinel.data.WipeInProgress
 import com.bp22intel.edgesentinel.data.local.EdgeSentinelDatabase
 import com.bp22intel.edgesentinel.domain.model.DetectionSensitivity
 import com.bp22intel.edgesentinel.service.MonitoringService
 import com.bp22intel.edgesentinel.service.ScanWorker
 import com.bp22intel.edgesentinel.travel.DataWipeManager
+import com.bp22intel.edgesentinel.travel.DefaultProcessRestarter
+import com.bp22intel.edgesentinel.travel.LeftoverDatabaseCheck
+import com.bp22intel.edgesentinel.travel.PanicWipeSequence
+import com.bp22intel.edgesentinel.travel.ProcessRestarter
+import com.bp22intel.edgesentinel.travel.WipeResult
 import com.bp22intel.edgesentinel.travel.TravelAdvisor
 import com.bp22intel.edgesentinel.travel.TravelExporter
 import com.bp22intel.edgesentinel.travel.TravelMode
 import com.bp22intel.edgesentinel.travel.TravelModeState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -44,13 +53,16 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.inject.Inject
 
 @HiltViewModel
 class TravelModeViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val dataStore: DataStore<Preferences>,
-    private val database: EdgeSentinelDatabase
+    private val database: EdgeSentinelDatabase,
+    private val applicationScope: CoroutineScope,
+    private val processRestarter: ProcessRestarter = DefaultProcessRestarter(context)
 ) : ViewModel() {
 
     companion object {
@@ -59,6 +71,12 @@ class TravelModeViewModel @Inject constructor(
         private val KEY_DETECTION_SENSITIVITY = stringPreferencesKey("detection_sensitivity")
         private val KEY_MONITORING_ENABLED = booleanPreferencesKey("monitoring_enabled")
         private const val STOP_TIMEOUT_MS = 5_000L
+        internal var wipeErrorDisplayMs = 4_000L
+        private val wipeActive = AtomicBoolean(false)
+
+        internal fun resetWipeActiveForTests() {
+            wipeActive.set(false)
+        }
     }
 
     private val travelMode = TravelMode(context)
@@ -70,6 +88,9 @@ class TravelModeViewModel @Inject constructor(
 
     private val _checkedItems = MutableStateFlow<Set<String>>(emptySet())
     val checkedItems: StateFlow<Set<String>> = _checkedItems.asStateFlow()
+
+    private val _isWiping = MutableStateFlow(false)
+    val isWiping: StateFlow<Boolean> = _isWiping.asStateFlow()
 
     init {
         _checkedItems.value = checklistPrefs.getStringSet(KEY_CHECKED_ITEMS, emptySet()) ?: emptySet()
@@ -147,15 +168,14 @@ class TravelModeViewModel @Inject constructor(
     /** Wipe error shown in the UI; null when there is none. */
     val wipeError: StateFlow<String?> = _wipeError.asStateFlow()
 
-    /** Set when a panic wipe failed; the process restarts after the user acknowledges. */
-    @Volatile private var restartAfterWipeErrorAck = false
-
     /** Called when the user dismisses the wipe-error dialog. */
     fun acknowledgeWipeError() {
         _wipeError.value = null
-        if (restartAfterWipeErrorAck) {
-            restartAfterWipeErrorAck = false
-            restartProcess()
+        // Defect 3: after a panic wipe the process restarts on its own; the
+        // dismiss action only restarts sooner. It never touches the database.
+        if (WipeInProgress.isActive) {
+            WipeInProgress.restoreHandlerBeforeRestart()
+            processRestarter.restartProcess()
         }
     }
 
@@ -183,54 +203,81 @@ class TravelModeViewModel @Inject constructor(
     }
 
     fun panicWipe() {
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                // N4: disable monitoring auto-start BEFORE anything else, so
-                // neither the app nor the system restarts monitoring after the wipe.
-                MonitoringService.setAutoStartDisabled(context, true)
-                try { dataStore.edit { it[KEY_MONITORING_ENABLED] = false } } catch (_: Exception) {}
-
-                // N3: stop background scanning and WAIT until it has stopped,
-                // so nothing writes to Room during or after the wipe.
-                try { MonitoringService.stopAndAwait(context, STOP_TIMEOUT_MS) } catch (_: Exception) {}
-                try { ScanWorker.cancelAndAwait(context, STOP_TIMEOUT_MS) } catch (_: Exception) {}
-
-                // F6: clear the live DataStore singletons BEFORE files are deleted,
-                // so they cannot rewrite old values from memory afterwards.
-                try { travelMode.confirmExit() } catch (_: Exception) {}  // travel_mode store
+        if (WipeInProgress.isActive || !wipeActive.compareAndSet(false, true)) {
+            try {
+                android.util.Log.w("TravelModeViewModel", "Panic wipe already in progress, ignoring duplicate call")
+            } catch (_: Throwable) {}
+            return
+        }
+        _isWiping.value = true
+        applicationScope.launch {
+            // Defect 1/3: block every repository read/write first, inside the application-scoped job.
+            WipeInProgress.begin()
+            try {
+                // N4: disable monitoring auto-start BEFORE anything else.
+                MonitoringService.markPanicWipeSuppression(context)
+                val preErrors = mutableListOf<String>()
+                try { dataStore.edit { it[KEY_MONITORING_ENABLED] = false } } catch (e: Exception) {
+                    preErrors.add("Failed to disable monitoring setting: ${e.message ?: e.javaClass.simpleName}")
+                }
+                try { travelMode.confirmExit() } catch (e: Exception) {
+                    preErrors.add("Failed to clear travel mode: ${e.message ?: e.javaClass.simpleName}")
+                }
                 _checkedItems.value = emptySet()
 
-                val closeError = try {
-                    database.close()
-                    null
-                } catch (e: Exception) {
-                    "Failed to close database: ${e.message}"
-                }
-                val wipe = DataWipeManager(context).panicWipe(dataStores = listOf(dataStore))
+                // Defect 1: stop results are checked. A timeout or exception is
+                // recorded; the gate stays set; Room is closed only when no
+                // writer is active (PanicWipeSequence).
+                val sequence = PanicWipeSequence(
+                    stopService = { MonitoringService.stopAndAwait(context, STOP_TIMEOUT_MS) },
+                    cancelWorker = { ScanWorker.cancelAndAwait(context, STOP_TIMEOUT_MS) },
+                    writersActive = {
+                        MonitoringService.isRunning.value || WipeInProgress.activeOperations > 0
+                    },
+                    closeDatabase = { database.close() },
+                    wipe = { DataWipeManager(context).panicWipe(dataStores = listOf(dataStore)) },
+                    writerDrainTimeoutMs = STOP_TIMEOUT_MS
+                )
+                val wipe = sequence.run()
                 // The settings store was cleared; keep auto-start disabled.
-                MonitoringService.setAutoStartDisabled(context, true)
-                if (closeError != null) wipe.copy(success = false, errors = wipe.errors + closeError) else wipe
-            }
+                MonitoringService.markPanicWipeSuppression(context)
+                val result = WipeResult.of(wipe.filesDeleted, preErrors + wipe.errors)
 
-            if (result.success) {
-                // F6: Room is closed and its files are confirmed gone. Restart the
-                // process so no code touches the closed database.
-                restartProcess()
-            } else {
-                // NF4: show the failure. Restart only after the user acknowledges it.
-                restartAfterWipeErrorAck = true
-                _wipeError.value = "Panic wipe did not complete. Some data may remain.\n" +
-                    result.errors.joinToString("\n")
+                if (!result.success) {
+                    // Defect 3: show the error, then restart anyway. WipeInProgress
+                    // blocks all repository access until the process ends.
+                    _wipeError.value = "Panic wipe did not complete. Some data may remain. " +
+                        "The app will restart now.\n" + result.errors.joinToString("\n")
+                    delay(wipeErrorDisplayMs)
+                }
+                // Round 4: final leftover check right before the restart. If any
+                // writer re-created the DB file, delete it again and record it.
+                val leftover = LeftoverDatabaseCheck.run(
+                    LeftoverDatabaseCheck.DB_FILE_NAMES.map { context.getDatabasePath(it) }
+                )
+                if (leftover.isNotEmpty()) {
+                    try {
+                        android.util.Log.e("PanicWipe", leftover.joinToString("; "))
+                    } catch (_: Throwable) {}
+                    context.getSharedPreferences("panic_wipe_status", Context.MODE_PRIVATE).edit()
+                        .putString("last_leftover_errors", leftover.joinToString("\n")).commit()
+                }
+            } finally {
+                withContext(NonCancellable) {
+                    try {
+                        WipeInProgress.restoreHandlerBeforeRestart()
+                        processRestarter.restartProcess()
+                        WipeInProgress.abort()
+                        _isWiping.value = false
+                        wipeActive.set(false)
+                    } catch (t: Throwable) {
+                        WipeInProgress.abort()
+                        _isWiping.value = false
+                        wipeActive.set(false)
+                        throw t
+                    }
+                }
             }
         }
-    }
-
-    private fun restartProcess() {
-        val launch = context.packageManager.getLaunchIntentForPackage(context.packageName)
-        val component = launch?.component
-        if (component != null) {
-            context.startActivity(Intent.makeRestartActivityTask(component))
-        }
-        Runtime.getRuntime().exit(0)
     }
 }

@@ -42,9 +42,10 @@ import com.bp22intel.edgesentinel.data.local.entity.TrustedNetworkEntity
         BaselineEntity::class,
         KnownTowerEntity::class,
         TrustedNetworkEntity::class,
-        EstimatedTowerPositionEntity::class
+        EstimatedTowerPositionEntity::class,
+        com.bp22intel.edgesentinel.data.local.entity.BssidSightingEntity::class
     ],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -58,4 +59,5 @@ abstract class EdgeSentinelDatabase : RoomDatabase() {
     abstract fun trustedNetworkDao(): TrustedNetworkDao
     abstract fun alertFeedbackDao(): AlertFeedbackDao
     abstract fun estimatedTowerPositionDao(): EstimatedTowerPositionDao
+    abstract fun bssidSightingDao(): com.bp22intel.edgesentinel.data.local.dao.BssidSightingDao
 }
