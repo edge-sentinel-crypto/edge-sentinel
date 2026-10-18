@@ -11,6 +11,7 @@
 package com.bp22intel.edgesentinel.detection.tower
 
 import android.content.Context
+import android.content.SharedPreferences
 import com.bp22intel.edgesentinel.data.local.dao.KnownTowerDao
 import com.bp22intel.edgesentinel.data.local.entity.KnownTowerEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,10 +32,14 @@ class TowerDatabaseManager @Inject constructor(
     private val knownTowerDao: KnownTowerDao
 ) {
     companion object {
-        // OpenCelliD download URL pattern
-        // Users need to register for a free API token at opencellid.org
-        // Or use the community mirror at https://opencellid.org/downloads.php
-        private const val OPENCELLID_BASE = "https://opencellid.org/ocid/downloads"
+        const val BUNDLED_TOWER_DATA_VERSION = 2
+        const val KEY_BUNDLED_TOWER_DATA_VERSION = "bundled_tower_data_version"
+        const val PREFS_NAME = "tower_database_prefs"
+
+        /**
+         * Mobile Country Codes for the United States (MCC 310 to 316) bundled in us_towers.csv.gz.
+         */
+        val US_MCCS = (310..316).toList()
         
         // MCC to country name mapping for UI
         val MCC_COUNTRIES = mapOf(
@@ -207,29 +212,113 @@ class TowerDatabaseManager @Inject constructor(
         }
     }
 
+    internal var assetOpener: ((String) -> InputStream)? = null
+
+    internal fun getPrefs(): SharedPreferences {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) return prefs
+        val fallback = context.getSharedPreferences("edge_sentinel", Context.MODE_PRIVATE)
+        if (fallback.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) return fallback
+        return prefs
+    }
+
+    private fun openBundledAsset(): InputStream {
+        return assetOpener?.invoke("us_towers.csv.gz") ?: context.assets.open("us_towers.csv.gz")
+    }
+
     /**
-     * Auto-import bundled tower data from APK assets on first launch.
+     * Returns the currently stored bundled tower database version, or 0 if none is stored.
+     */
+    fun getStoredBundledVersion(): Int {
+        val prefs = getPrefs()
+        return prefs.getInt(KEY_BUNDLED_TOWER_DATA_VERSION, 0)
+    }
+
+    /**
+     * Returns the effective bundled tower database version:
+     * - Stored version in SharedPreferences if present.
+     * - Version 1 if towers are loaded but no version was recorded (legacy install).
+     * - Version 0 if no towers are loaded and no version was recorded (fresh install).
+     */
+    suspend fun getEffectiveBundledVersion(): Int {
+        val prefs = getPrefs()
+        return if (prefs.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) {
+            prefs.getInt(KEY_BUNDLED_TOWER_DATA_VERSION, 0)
+        } else if (knownTowerDao.getTowerCount() > 0) {
+            1
+        } else {
+            0
+        }
+    }
+
+    private fun logD(tag: String, msg: String) {
+        try {
+            android.util.Log.d(tag, msg)
+        } catch (_: RuntimeException) {
+            // Android stub in unit tests
+        }
+    }
+
+    private fun logE(tag: String, msg: String, tr: Throwable? = null) {
+        try {
+            if (tr != null) android.util.Log.e(tag, msg, tr) else android.util.Log.e(tag, msg)
+        } catch (_: RuntimeException) {
+            // Android stub in unit tests
+        }
+    }
+
+    /**
+     * Auto-import bundled tower data from APK assets on first launch or update.
      * The asset is a gzipped CSV pre-filtered to high-confidence US towers (≥10 samples).
-     * Only runs once — checks if towers already exist before importing.
+     * If an update is available (bundled version > stored version), previous US towers
+     * (MCC 310 to 316) are removed and replaced with the updated bundle.
+     * Non-US towers imported for other countries are preserved.
      */
     suspend fun autoImportBundledData() {
         withContext(Dispatchers.IO) {
-            // Skip if towers are already loaded
-            if (knownTowerDao.getTowerCount() > 0) {
-                android.util.Log.d("TowerDB", "Towers already loaded, skipping auto-import")
+            val prefs = getPrefs()
+            val totalTowers = knownTowerDao.getTowerCount()
+            val storedVersion = if (prefs.contains(KEY_BUNDLED_TOWER_DATA_VERSION)) {
+                prefs.getInt(KEY_BUNDLED_TOWER_DATA_VERSION, 0)
+            } else if (totalTowers > 0) {
+                // An existing install with towers loaded but no stored version counts as version 1
+                1
+            } else {
+                0
+            }
+
+            if (storedVersion >= BUNDLED_TOWER_DATA_VERSION) {
+                logD(
+                    "TowerDB",
+                    "Bundled tower database is up to date (version $storedVersion), skipping auto-import"
+                )
                 return@withContext
             }
 
             try {
-                android.util.Log.d("TowerDB", "Auto-importing bundled US tower database...")
-                val assetStream = context.assets.open("us_towers.csv.gz")
+                logD(
+                    "TowerDB",
+                    "Auto-importing bundled US tower database (current=$storedVersion, target=$BUNDLED_TOWER_DATA_VERSION)..."
+                )
+                val assetStream = openBundledAsset()
                 val gzipStream = java.util.zip.GZIPInputStream(java.io.BufferedInputStream(assetStream))
+
+                // Delete only US rows previously imported from bundle (MCC 310 to 316).
+                // Do not delete towers the user imported for other countries.
+                knownTowerDao.deleteTowersByCountries(US_MCCS)
 
                 // The bundled CSV has slim format: radio,mcc,mnc,lac,cid,lon,lat,range,samples
                 importFromCsv(gzipStream, null)
-                android.util.Log.d("TowerDB", "Auto-import complete: ${knownTowerDao.getTowerCount()} towers")
+
+                // Crash-safe: write the new version only after the import completes successfully
+                prefs.edit().putInt(KEY_BUNDLED_TOWER_DATA_VERSION, BUNDLED_TOWER_DATA_VERSION).apply()
+                logD(
+                    "TowerDB",
+                    "Auto-import complete: ${knownTowerDao.getTowerCount()} towers (version $BUNDLED_TOWER_DATA_VERSION)"
+                )
             } catch (e: Exception) {
-                android.util.Log.e("TowerDB", "Auto-import from assets failed", e)
+                logE("TowerDB", "Auto-import from assets failed", e)
+                throw e
             }
         }
     }
