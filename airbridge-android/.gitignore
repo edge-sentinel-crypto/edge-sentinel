@@ -1,0 +1,27 @@
+# Gradle and Android build output and caches
+.gradle/
+build/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Local machine settings (local.properties holds the SDK path of one machine)
+local.properties
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Built packages: the APK is published as a GitHub release asset, never committed
+*.apk
+*.aab
+*.ap_
+*.apks
+*.dex
+
+# Signing keys and keystores
+*.jks
+*.keystore
+*.p12
+keystore.properties

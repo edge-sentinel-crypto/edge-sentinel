@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AirBridge</string>
+    <string name="notification_channel_name">Streaming</string>
+    <string name="notification_channel_description">Shown while AirBridge sends your phone\'s audio to AirPlay speakers</string>
+    <string name="notification_title">AirBridge is streaming</string>
+    <string name="notification_text_none">Capturing audio. Turn on a speaker in the app.</string>
+    <plurals name="notification_text_some">
+        <item quantity="one">Sending audio to %1$d speaker</item>
+        <item quantity="other">Sending audio to %1$d speakers</item>
+    </plurals>
+    <string name="notification_stop">Stop</string>
+</resources>
