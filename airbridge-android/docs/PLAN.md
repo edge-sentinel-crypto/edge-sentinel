@@ -5,9 +5,13 @@ audio other apps are playing on the phone and streams it over local Wi-Fi to Air
 speakers: Sonos, HomePod, Apple TV, Denon/Marantz/Yamaha receivers, WiiM, AirPort Express,
 Shairport-Sync and others. Several speakers can play at once, each with its own volume.
 
+Version 0.2.0 adds multi-room controls: a master volume that keeps the balance between speakers, a
+per-speaker sync offset of up to 250 ms earlier or later, and saved speaker groups with an
+All on / All off toggle (section 8).
+
 ## 1. The most important limitation: Spotify
 
-Read this first if you use Spotify.
+Read this first if you plan to use AirBridge with Spotify.
 
 Android lets an app capture other apps' audio only through the AudioPlaybackCapture API, and every
 app can refuse to be captured. Spotify refuses. Current Spotify builds play through native AAudio
@@ -44,6 +48,9 @@ What AirBridge does about it:
    the others. All speakers share one clock, so they play in step.
 5. Speakers play about 2 seconds behind the phone. That delay is the AirPlay network buffer. It
    protects music against Wi-Fi hiccups, but makes AirBridge unsuitable for lip-sync with video.
+6. If one speaker sounds slightly ahead of or behind the others, its sync offset moves it by up to
+   250 ms (1.75 to 2.25 s behind the phone). Saved groups switch between sets of speakers, and the
+   master slider turns them all up or down together.
 
 ## 3. Architecture
 
@@ -69,6 +76,10 @@ What AirBridge does about it:
 
  Discovery: NsdManager (_raop._tcp, _airplay._tcp) + raw mDNS legacy-unicast browser
             -> ReceiverRegistry (merge by device id / IP) -> UI list (+ manual IP:port)
+
+ Multi-room: UI -> MainViewModel -> AirBridgeController -> MultiRoomController
+            (on/off, groups, All on/off, volume + master, sync offset; saved in AppSettings)
+            -> AirPlaySessionManager: connect / disconnect / setVolume / setSyncOffsetMs
 ```
 
 Source layout (`app/src/main/java/com/airbridge/airplay/`):
@@ -79,14 +90,16 @@ Source layout (`app/src/main/java/com/airbridge/airplay/`):
 | `mdns/` | `DiscoveryManager` (NsdManager + MulticastLock), `RawMdnsBrowser`, `MdnsMessage` (DNS codec), `TxtRecord`, `AirPlayFeatures`, `AirPlayReceiver`, `ReceiverRegistry` |
 | `codec/` | `AlacEncoder`/`AlacDecoder`, `PcmL16`, `BinaryPlist` (bplist00), `Tlv8` |
 | `crypto/` | `SrpClient`/`SrpMath` (SRP-6a), `HapCrypto` (HKDF-SHA-512, ChaCha20-Poly1305, nonces), `X25519KeyPair`, `Ed25519KeyPair` |
-| `airplay/` | `RtspClient`, `RtspCodec`, `HapSecureStreams`, `RtpPackets`, `RtpStreamer` (data/control/timing UDP), `AirPlaySender` contract, `StreamTimeline`, `AirPlayVolume` |
+| `airplay/` | `RtspClient`, `RtspCodec`, `HapSecureStreams`, `RtpPackets`, `RtpStreamer` (data/control/timing UDP), `AirPlaySender` contract, `StreamTimeline`, `AirPlayVolume`, `SyncOffset` |
 | `airplay/raop/` | `RaopSender`, `RaopEncryption` (RSA-OAEP + AES-128-CBC) |
 | `airplay/ap2/` | `Ap2Sender`, `HapPairing`, `EventChannel`, `PairingStore` |
 | `session/` | `AirPlaySessionManager`, `ReceiverSession`, `SenderFactory` |
-| `ui/` | Compose Material 3 screen, dialogs, diagnostics sheet, theme, icons, `MainViewModel` |
+| `multiroom/` | `MultiRoomController` (speaker on/off, All on / All off, groups, per-speaker and master volume, sync offsets), `MasterVolumeCalculator`, `MasterVolumeDrag`, `SpeakerGroup`, `SpeakerGroupCodec`, `SpeakerGroups`, `SpeakerStore` |
+| `ui/` | Compose Material 3 screen, multi-room bar, dialogs, diagnostics sheet, theme, icons, `MainViewModel` |
 
-The protocol engine (`codec`, `crypto`, `airplay`, `session`, most of `mdns` and `audio`) is plain
-JVM Kotlin with no Android imports, so it runs unchanged in the unit and loopback tests.
+The protocol engine (`codec`, `crypto`, `airplay`, `session`, `multiroom`, most of `mdns` and
+`audio`) is plain JVM Kotlin with no Android imports, so it runs unchanged in the unit and loopback
+tests.
 
 ## 4. System audio capture
 
@@ -136,8 +149,9 @@ JVM Kotlin with no Android imports, so it runs unchanged in the unit and loopbac
   required, 0x200 one-time pairing required.
 - **De-duplication:** most receivers advertise both services (`AABBCCDDEEFF@Kitchen` and `Kitchen`
   with `deviceid=AA:BB:..`). They are merged by device id, falling back to IP address; an entry
-  keyed by IP is upgraded when the id appears. NSD "service lost" removes one advertisement;
-  raw-mDNS entries expire after 5 minutes without a refresh.
+  keyed by IP is upgraded when the id appears. NSD "service lost" removes one advertisement; any
+  discovered entry that is not refreshed for 5 minutes expires (raw mDNS has no "lost" event; the
+  raw browser re-queries every 4 s). Manually added speakers do not expire.
 - **Protocol choice (Auto):** AirPlay 2 when the `_airplay._tcp` service is present and feature bit
   38, 46 or 48 is set (pyatv's rule). Exception: Shairport-Sync (`model`/`am` contains
   "Shairport") uses AirPlay 1, because its AirPlay 2 mode only accepts PTP timing (see 7.6).
@@ -220,9 +234,9 @@ ourKey|ourId|receiverKey; M4 done. Keys: HKDF(shared, "Pair-Verify-Encrypt-Salt/
 "PV-Msg02"/"PV-Msg03". The X25519 shared secret becomes the session secret. If a saved pairing is
 rejected (receiver reset), it is deleted and the next attempt pairs again.
 
-**Note on pairing order.** The order "pair-setup transient 3939 -> pair-verify" does not match
-real receivers: after a transient pair-setup the connection is
-already encrypted with keys from the SRP secret, and a plaintext pair-verify would be rejected.
+**Note on the pairing order.** A transient pair-setup (PIN 3939) is not followed by a pair-verify.
+Real receivers do not expect one: after a transient pair-setup the connection is already
+encrypted with keys from the SRP secret, and a plaintext pair-verify would be rejected.
 Pair-Verify belongs after a PIN/password pair-setup and on reconnects with saved keys. AirBridge
 implements both paths, and the loopback tests cover transient pairing, PIN pairing followed by
 Pair-Verify, and Pair-Verify alone with saved keys.
@@ -278,14 +292,83 @@ automatically when it advertises it.
 - **Encoding once:** each 352-frame block is ALAC-encoded once on the capture thread and shared;
   per-speaker work is only the RTP header plus AES (AirPlay 1) or ChaCha20-Poly1305 (AirPlay 2).
 - **Volume:** a 0-100 % slider maps linearly to -30..0 dB; 0 % sends -144 (mute). Changes go over
-  each speaker's own control thread and never block the UI.
+  each speaker's own control thread and never block the UI. Rapid changes are coalesced: at most
+  one `SET_PARAMETER` per speaker is queued, and it carries the latest value. A change made while
+  a speaker is still connecting is sent once the connection is up.
 - **Latency:** sync packets announce 77,175 frames plus the 0x07 flag. Receivers add their fixed
   11,025 frames, so the total is 88,200 frames = 2.0 s. AirPlay 2 SETUP announces latencyMin 11,025
-  and latencyMax 88,200. Speakers on different protocols may not be sample-aligned with each
-  other; this needs a check on real hardware.
+  and latencyMax 88,200. A per-speaker sync offset shifts the announced latency (section 8.2).
+  Speakers on different protocols may not be sample-aligned with each other; this needs a check
+  on real hardware, and the sync offset is the tool to correct it by ear.
 - **Reconnect:** a failed connect retries with backoff (1, 2, 4, 8, 15 s, then waits for "Retry").
   Repeated keep-alive or feedback failures trigger a reconnect. PIN and password prompts pause the
   session until the user answers. A wrong PIN makes the receiver show a fresh code.
+
+### 8.1 Master volume (v0.2.0)
+
+- The master slider appears above the speaker list whenever at least one speaker is on. Its value
+  is the loudest speaker that is on.
+- When a drag starts, `MultiRoomController` takes a snapshot of the volume of every speaker that is
+  on (`MasterVolumeDrag`). Each slider position `m` sets every speaker in the snapshot to
+  `round(v * m / top)`, where `v` is its snapshot volume and `top` the loudest snapshot volume,
+  clamped to 0..100 (`MasterVolumeCalculator`). The loudest speaker always lands exactly on `m`.
+  Every step is computed from the snapshot, never from the previous step, so dragging down and
+  back up returns every speaker exactly to its starting volume.
+- Edge cases: if every speaker is at 0 the balance is unknown, so they are raised together to `m`;
+  a single speaker follows the slider directly; values below 0 or above 100 are clamped.
+- While dragging, only speakers whose value changed get a live volume command (and the senders
+  coalesce bursts). The new volumes are saved in `AppSettings` when the finger lifts.
+- No feedback loop: the master value shown is derived from the speaker volumes and is never written
+  back. Moving one speaker's own slider changes only that speaker; the master display follows.
+
+### 8.2 Per-speaker sync offset (v0.2.0)
+
+- Each speaker has an offset from -250 to +250 ms in 5 ms steps (default 0), set from its menu
+  (Sync offset dialog with a live label and a Reset button) and saved per speaker in `AppSettings`.
+- **Sign convention** (code, UI and this document): **negative = the speaker plays earlier,
+  positive = the speaker plays later (a delay).**
+- Mechanism: the offset changes only the latency in that speaker's RTP sync packets. The packet
+  says that the frame with RTP time `rtpNow - L` is due at the current NTP time, with
+  `L = 77,175 + round(offsetMs x 44.1)` frames (halves rounded away from zero, so +x and -x ms
+  give the same magnitude: -250..+250 ms = -11,025..+11,025 frames). A larger `L` schedules every
+  frame later. `L` never goes below 22,050 frames (0.5 s). With the receivers' fixed 11,025 frames
+  the total buffer is 1.75 to 2.25 s instead of 2.0 s.
+- Path: `AppSettings` -> `AirBridgeController` (`MultiRoomController`) -> `ConnectOptions.syncOffsetMs`
+  -> `ReceiverSession` -> `AirPlaySender.setSyncOffsetMs` (`RaopSender`, `Ap2Sender`) ->
+  `RtpStreamer.syncOffsetMs` -> `RtpPackets.sync`.
+- **Live change without reconnecting:** `sessions.setSyncOffsetMs(id, ms)` updates the sender's
+  volatile offset and flags a forced sync; the speaker's own worker thread sends the sync packet on
+  its next tick (at most about 10 ms later), as a regular `0x80 0xD4` sync packet. The RTSP or HAP
+  session, the UDP ports, the RTP sequence numbers and timestamps stay the same: no FLUSH, no new
+  SETUP, no new pairing. A change made while the speaker is still connecting is applied as soon as
+  it is connected.
+- How to use it: if a speaker sounds ahead of the others, give it a positive offset (delay); if it
+  lags, a negative one.
+- Not yet verified on hardware: how smoothly each receiver model re-aligns after a latency change
+  (some may skip or pause briefly), and how AirPlay 2 receivers treat a total delay above the
+  2.0 s `latencyMax` announced in the stream SETUP (up to 2.25 s with +250 ms).
+
+### 8.3 Saved speaker groups and All on / All off (v0.2.0)
+
+- A group is `SpeakerGroup(id, name, receiverIds)`. Groups are kept in order in one app-private
+  preference: a `v1` header line, then one line per group in which the id, the name and every
+  member id are stored as hex of their UTF-8 bytes (`SpeakerGroupCodec`). Any text (Unicode,
+  quotes, pipes, commas, colons, line breaks) round-trips exactly; unreadable lines are skipped.
+- **Save group** stores the speakers that are on now. Names are cleaned (line breaks and control
+  characters become spaces, trimmed, at most 40 characters) and cannot be empty; at least one
+  speaker must be on; up to 24 groups. Saving under the name of an existing group (ignoring case)
+  replaces that group's speakers. Long-press a group to rename it (not to another group's name) or
+  delete it.
+- **Applying a group** switches on exactly the group's members that are available now and switches
+  off every other speaker. Members that are not on the network are skipped; if none is available,
+  nothing changes. While streaming, speakers that leave the selection disconnect (TEARDOWN),
+  speakers that join connect, and speakers in both keep playing without a reconnect.
+- A group chip is highlighted with a check mark when the speakers that are on (among those
+  available) are exactly the group's available members. A group with members that are not found
+  shows how many are available, for example "Everywhere · 2/4".
+- **All on / All off:** "All on" switches on every listed speaker (discovered or added by IP);
+  when every listed speaker is on the same chip reads "All off" and switches every speaker off.
+  While streaming, speakers connect or disconnect at once; the capture keeps running.
 
 ## 9. User interface (Jetpack Compose, Material 3)
 
@@ -293,26 +376,39 @@ automatically when it advertises it.
   (teal/amber/red) with peak hold, an active/enabled speaker count pill, and a Start/Stop button.
 - Red banner when capture is blocked, with the Spotify explanation.
 - Battery optimization card ("Keep streaming with the screen off" -> system prompt).
+- Multi-room bar above the speaker list (v0.2.0): the All on / All off chip, one chip per saved
+  group (tap to play it, long-press to rename or delete, check mark when it matches) and
+  "Save group". The chips wrap onto a second line instead of scrolling sideways.
+- Master volume card (v0.2.0), shown when at least one speaker is on: slider, percentage and the
+  number of speakers it controls.
 - Speaker cards: name, model, IP, "AirPlay 2"/"AirPlay 1" badge, lock icon for PIN/password
-  speakers, on/off switch, status line with actions (Enter code / Enter password / Retry), volume
-  slider, menu with Automatic / Force AirPlay 2 / Force AirPlay 1 and Remove (manual speakers).
-- Dialogs: add by IP, 4-digit code, password. Diagnostics sheet: capture state, help for Spotify,
-  discovery, PIN/password and battery, per-speaker packet/retransmit/drop counters, recent log
-  with Copy.
-- Rendered screenshots (JVM, Robolectric): [`screenshots/01-ready.png`](../screenshots/01-ready.png),
+  speakers, a small sync-offset badge such as "+40 ms" when the offset is not 0, on/off switch,
+  status line with actions (Enter code / Enter password / Retry), volume slider, menu with
+  Automatic / Force AirPlay 2 / Force AirPlay 1, Sync offset and Remove (manual speakers).
+- Dialogs: add by IP, 4-digit code, password, sync offset (slider -250..+250 ms in 5 ms steps, live
+  label such as "+40 ms (delay)", "-25 ms (earlier)" or "0 ms", Reset and Done), save group, edit
+  group. Diagnostics sheet: capture state, help for Spotify, discovery, PIN/password, sync offset,
+  groups and battery, per-speaker packet/retransmit/drop counters and sync offset, recent log with
+  Copy.
+- Rendered screenshots (JVM, Robolectric): [`01-ready.png`](../screenshots/01-ready.png),
   [`02-streaming.png`](../screenshots/02-streaming.png),
-  [`03-capture-blocked.png`](../screenshots/03-capture-blocked.png), plus the launcher and
-  status-bar icons.
+  [`03-capture-blocked.png`](../screenshots/03-capture-blocked.png),
+  [`04-multi-room.png`](../screenshots/04-multi-room.png),
+  [`05-sync-offset.png`](../screenshots/05-sync-offset.png), plus the
+  [launcher](../screenshots/00-launcher-icon.png) and [status-bar](../screenshots/00-status-icon.png)
+  icons, all in [`screenshots/`](../screenshots/).
 
 ## 10. Privacy and security
 
 - No internet access is used. The only network traffic is mDNS and AirPlay to speakers on the LAN.
   No accounts, analytics, ads or crash reporting.
 - Stored on the phone (app-private SharedPreferences, excluded from cloud backup and device
-  transfer): selected speakers, volumes, protocol choices, manual speakers, a random sender
-  identity, and the HAP long-term key plus PIN pairings. Receiver passwords and PINs are kept in
-  memory only.
+  transfer): selected speakers, volumes, protocol choices, sync offsets, saved groups (names and
+  speaker ids), manual speakers, a random sender identity, and the HAP long-term key plus PIN
+  pairings. Receiver passwords and PINs are kept in memory only.
 - The only key compiled into the app is the public RSA key of the AirPort Express protocol.
+- The published APK is a debuggable debug build. With USB debugging enabled, `adb run-as
+  com.airbridge.airplay` can read the app's private settings, including the HAP pairing keys.
 
 ## 11. Testing strategy
 
@@ -324,8 +420,10 @@ automatically when it advertises it.
 | Audio pipeline | ring buffer wrap/overflow and a 2-million-sample concurrent stress test, chunker, meter dBFS, blocked-capture detector timing, drift corrector | JVM |
 | AirPlay 1 | full RTSP + UDP sessions against a socket mock receiver: plain ALAC, RSA/AES, digest password + L16, wrong/missing password, 403 -> auth-setup, retransmit, sync, timing, volume, FLUSH, TEARDOWN; decoded PCM equals sent PCM | loopback |
 | AirPlay 2 | GET /info, transient pairing, PIN pairing + Pair-Verify + saved-key Pair-Verify, wrong PIN, password, HTTP 470, encrypted RTSP, both SETUPs, feedback, event channel, sealed RTP decrypted and decoded bit-exact, L16 variant | loopback |
-| Sessions | AP1 + AP2 at once with identical timestamps and independent volumes; AP2 -> AP1 fallback; forced AP2 does not fall back; PIN prompt -> wrong code -> new code -> streaming | loopback |
-| UI | Compose screen rendered to PNG (optional test) | Robolectric |
+| Sessions | AP1 + AP2 at once with identical timestamps and independent volumes; AP2 -> AP1 fallback; forced AP2 does not fall back; PIN prompt -> wrong code -> new code -> streaming; volume and sync-offset changes made while connecting reach the sender | loopback, JVM |
+| Multi-room logic (v0.2.0) | master volume scaling, drag snapshot round trip, all-zero, clamping, single speaker, derived master without feedback; sync offset ms -> frames for every 5 ms step from -250 to +250, clamping, snapping, latency floor, labels; group storage round trips (Unicode, quotes, pipes, commas, line breaks, empty names), damaged data, duplicates, CRUD rules, offline members, matching | JVM |
+| Multi-room live (v0.2.0) | AP1 and AP2 sync packets carry the shifted latency on connect and right after a live change (same session, audio bit-exact, no new SETUP/pairing/TEARDOWN); per-speaker offsets through the session manager; All on / All off connecting and disconnecting live speakers; a group applied mid-stream with an offline member; master volume drag on live speakers; offsets saved and reused on reconnect | loopback |
+| UI | Compose screen rendered to PNG (optional test), screen-state derivations (master display, All on/off label, group chips) | Robolectric, JVM |
 
 What tests cannot prove: that a specific Sonos/HomePod/Apple TV/AVR firmware accepts every detail
 (especially NTP timing for AirPlay 2), Android capture behaviour on each phone model, battery
@@ -343,16 +441,18 @@ section 13.
 | Lip sync with video | Not suitable: about 2 s of delay |
 | Phone keeps playing locally | Android does not let capture apps silence the source. Lower the phone volume; on most phones the captured stream does not depend on it (check once) |
 | Screen lock | Some Android versions end a capture session when the phone locks; AirBridge then stops cleanly and says so |
-| Cross-protocol sync | AirPlay 1 and AirPlay 2 speakers in one room may be slightly offset |
+| Cross-protocol sync | AirPlay 1 and AirPlay 2 speakers in one room may be slightly offset; the per-speaker sync offset (up to 250 ms either way) can line them up by ear |
+| Sync offset on real receivers | Each receiver must re-align after a latency change; some may skip or pause briefly. AirPlay 2 receivers are told latencyMax 88,200 frames at SETUP, while a positive offset asks for up to 11,025 frames more. Not yet checked on hardware |
 | VPN apps, guest Wi-Fi, AP/client isolation | Can block discovery or streaming; turn off the VPN or use the main Wi-Fi |
 
 ## 13. Build plan (done) and on-device test plan (next)
 
-Done in this build: protocol engine, Android capture service, discovery, UI, 83 automated tests,
-lint clean, signed debug APK (`AirBridge-debug.apk`, attached to the
-[v0.1.0-debug release](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.1.0-debug)).
+Done: protocol engine, Android capture service, discovery and UI (v0.1.0-debug); master volume,
+per-speaker sync offset, saved groups and All on / All off (v0.2.0-debug); 115 automated tests,
+lint clean, signed debug APK (`AirBridge-debug.apk`, published in the
+[v0.2.0-debug release](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.2.0-debug)).
 
-Next, on a real phone and speakers:
+Next, on real phones and speakers:
 
 1. Install ([INSTALL.md](INSTALL.md)), open AirBridge, check every speaker appears with the right badge.
 2. Play from an app that allows capture (for example a downloaded MP3 in the Files or a podcast
@@ -360,7 +460,12 @@ Next, on a real phone and speakers:
    Note for each: connects (Y/N), protocol shown, audio (Y/N), volume works, dropouts in 10 min.
 3. If an AirPlay 2 speaker shows "Playing" but stays silent, set it to "Force AirPlay 1" and
    repeat. Report which ones needed it.
-4. Two and three speakers at once; check they are in step.
-5. Lock the screen for 10 minutes; confirm audio continues (or note the Android message).
-6. Start Spotify and confirm the blocked-capture banner appears within about 3 s.
-7. Send the Diagnostics log (Copy button) for any failure.
+4. Two and three speakers at once; check they are in step. If one is ahead or behind, set its
+   sync offset while the music plays and note the value that lines it up and whether the change
+   was smooth.
+5. Save two groups, switch between them while streaming, and use All on / All off and the master
+   slider; check the speakers follow.
+6. Lock the screen for 10 minutes; confirm audio continues (or note the Android message).
+7. Start Spotify and confirm the blocked-capture banner appears within about 3 s.
+8. For any failure, copy the Diagnostics log (Copy button) and include it in the bug report (for
+   example a GitHub issue).

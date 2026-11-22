@@ -22,12 +22,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Icon
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -35,14 +39,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.airbridge.airplay.airplay.AirPlayProtocol
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.audio.CaptureHealthMonitor
+import com.airbridge.airplay.multiroom.SpeakerGroup
+import com.airbridge.airplay.multiroom.SpeakerGroups
 import com.airbridge.airplay.session.SessionState
+import com.airbridge.airplay.ui.theme.AirBridgeColors
+import kotlin.math.roundToInt
 
 /** Manual IP:port entry for speakers that mDNS cannot see (other subnet, VLAN, guest Wi-Fi). */
 @Composable
@@ -215,6 +229,16 @@ fun DiagnosticsSheet(state: MainUiState, logLines: List<String>, onCopyLog: () -
                     "Speakers set to \"require password\" ask for their AirPlay password each time the app starts.",
             )
             HelpBlock(
+                "Speakers slightly out of step?",
+                "Open a speaker's menu > Sync offset. Negative values make that speaker play earlier, positive values " +
+                    "delay it (up to 250 ms either way). The change applies while the music plays, without reconnecting.",
+            )
+            HelpBlock(
+                "Groups and master volume",
+                "Save group stores the speakers that are on now; tap a group to play exactly those speakers, long-press it to " +
+                    "rename or delete it. The master slider moves all speakers that are on and keeps their balance.",
+            )
+            HelpBlock(
                 "Music stops when the screen turns off?",
                 "Allow AirBridge to ignore battery optimization (the card on the main screen, or Android Settings > Apps > AirBridge > Battery > Unrestricted).",
             )
@@ -229,6 +253,7 @@ fun DiagnosticsSheet(state: MainUiState, logLines: List<String>, onCopyLog: () -
                 val s = row.status!!
                 Text(
                     "${row.receiver.name}: ${s.state.label()} via ${s.protocol?.label ?: "-"}; packets ${s.packetsSent}, resent ${s.retransmits}, dropped ${s.droppedFrames}" +
+                        (if (s.syncOffsetMs != 0) "; sync offset ${SyncOffset.label(s.syncOffsetMs)}" else "") +
                         (s.message?.let { " - $it" } ?: ""),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -274,3 +299,160 @@ private fun captureText(state: MainUiState): String = when (state.stream.phase) 
 }
 
 private fun SessionState.label(): String = name.lowercase().replace('_', ' ')
+
+/**
+ * Per-speaker sync offset: -250..+250 ms in 5 ms steps. Negative = this speaker plays earlier,
+ * positive = later (a delay). The value is applied when the slider is released or Reset is
+ * tapped, while the music keeps playing; Done closes the dialog.
+ */
+@Composable
+fun SyncOffsetDialog(receiverName: String, initialMs: Int, onChange: (Int) -> Unit, onDismiss: () -> Unit) {
+    var ms by remember { mutableIntStateOf(SyncOffset.snap(initialMs)) }
+    val label = SyncOffset.label(ms)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(AppIcons.Tune, contentDescription = null) },
+        title = { Text("Sync offset") },
+        text = {
+            Column {
+                Text(
+                    "Line up $receiverName with your other speakers. Negative values make it play earlier; positive values delay it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    label,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = if (ms == 0) MaterialTheme.colorScheme.onSurface else AirBridgeColors.Teal,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Slider(
+                    value = ms.toFloat(),
+                    onValueChange = { ms = SyncOffset.snap(it.roundToInt()) },
+                    onValueChangeFinished = { onChange(ms) },
+                    valueRange = SyncOffset.MIN_MS.toFloat()..SyncOffset.MAX_MS.toFloat(),
+                    steps = (SyncOffset.MAX_MS - SyncOffset.MIN_MS) / SyncOffset.STEP_MS - 1,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = AirBridgeColors.Teal,
+                        inactiveTrackColor = Color(0x2EFFFFFF),
+                        activeTickColor = Color.Transparent,
+                        inactiveTickColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.fillMaxWidth().semantics {
+                        contentDescription = "Sync offset for $receiverName"
+                        stateDescription = label
+                    },
+                )
+                Row(Modifier.fillMaxWidth()) {
+                    Text("-250 ms · earlier", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                    Text("later · +250 ms", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Applies while the music plays, without reconnecting. The speaker re-aligns within a moment.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+        dismissButton = {
+            TextButton(enabled = ms != 0, onClick = { ms = 0; onChange(0) }) { Text("Reset") }
+        },
+    )
+}
+
+/** Names the speakers that are on now and saves them as a group (same name: replaces its speakers). */
+@Composable
+fun SaveGroupDialog(speakerNames: List<String>, existingNames: List<String>, onDismiss: () -> Unit, onSave: (String) -> Unit) {
+    var name by rememberSaveable { mutableStateOf("") }
+    val clean = SpeakerGroups.cleanName(name)
+    val replaces = clean != null && existingNames.any { it.equals(clean, ignoreCase = true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Save speaker group") },
+        text = {
+            Column {
+                Text(
+                    if (speakerNames.isEmpty()) "Turn on the speakers you want in the group first."
+                    else "Saves the ${speakerNames.size} speaker${if (speakerNames.size == 1) "" else "s"} that are on now: ${speakerNames.joinToString(", ")}.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(SpeakerGroups.MAX_NAME_LENGTH * 2) },
+                    label = { Text("Group name") },
+                    placeholder = { Text("Downstairs") },
+                    singleLine = true,
+                    supportingText = if (replaces) {
+                        { Text("A group with this name exists; its speakers will be replaced.") }
+                    } else {
+                        null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = clean != null && speakerNames.isNotEmpty(), onClick = { onSave(name) }) {
+                Text(if (replaces) "Replace" else "Save")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Long-press on a group chip: rename it or delete it. */
+@Composable
+fun EditGroupDialog(
+    group: SpeakerGroup,
+    memberNames: List<String>,
+    offlineCount: Int,
+    otherGroupNames: List<String>,
+    onDismiss: () -> Unit,
+    onRename: (String) -> Unit,
+    onDelete: () -> Unit,
+) {
+    var name by rememberSaveable(group.id) { mutableStateOf(group.name) }
+    val clean = SpeakerGroups.cleanName(name)
+    val taken = clean != null && otherGroupNames.any { it.equals(clean, ignoreCase = true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Edit group") },
+        text = {
+            Column {
+                val members = memberNames.joinToString(", ").ifEmpty { "none found right now" }
+                Text(
+                    "Speakers: $members" + if (offlineCount > 0) " (+$offlineCount not found right now)." else ".",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(SpeakerGroups.MAX_NAME_LENGTH * 2) },
+                    label = { Text("Group name") },
+                    singleLine = true,
+                    isError = taken || clean == null,
+                    supportingText = when {
+                        taken -> { { Text("Another group already has that name.") } }
+                        clean == null -> { { Text("Enter a name.") } }
+                        else -> null
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Spacer(Modifier.height(4.dp))
+                TextButton(onClick = onDelete, contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)) {
+                    Text("Delete group", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        },
+        confirmButton = { TextButton(enabled = clean != null && !taken, onClick = { onRename(name) }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}

@@ -28,14 +28,19 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.airbridge.airplay.audio.AudioCaptureService
 import com.airbridge.airplay.mdns.AirPlayReceiver
 import com.airbridge.airplay.mdns.ProtocolPreference
+import com.airbridge.airplay.multiroom.GroupChange
+import com.airbridge.airplay.multiroom.SpeakerGroup
 import com.airbridge.airplay.ui.AirBridgeScreen
 import com.airbridge.airplay.ui.DiagnosticsSheet
+import com.airbridge.airplay.ui.EditGroupDialog
 import com.airbridge.airplay.ui.MainViewModel
 import com.airbridge.airplay.ui.ManualReceiverDialog
 import com.airbridge.airplay.ui.PasswordDialog
 import com.airbridge.airplay.ui.PinDialog
 import com.airbridge.airplay.ui.ReceiverUi
+import com.airbridge.airplay.ui.SaveGroupDialog
 import com.airbridge.airplay.ui.ScreenActions
+import com.airbridge.airplay.ui.SyncOffsetDialog
 import com.airbridge.airplay.ui.theme.AirBridgeTheme
 
 /**
@@ -51,6 +56,9 @@ class MainActivity : ComponentActivity() {
     private var showDiagnostics by mutableStateOf(false)
     private var pinFor by mutableStateOf<ReceiverUi?>(null)
     private var passwordFor by mutableStateOf<ReceiverUi?>(null)
+    private var syncOffsetFor by mutableStateOf<ReceiverUi?>(null)
+    private var showSaveGroup by mutableStateOf(false)
+    private var editGroup by mutableStateOf<SpeakerGroup?>(null)
     private var batteryCardVisible by mutableStateOf(false)
 
     private val permissionLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
@@ -101,6 +109,43 @@ class MainActivity : ComponentActivity() {
                         message = row.status?.message,
                         onDismiss = { passwordFor = null },
                         onSubmit = { pw -> passwordFor = null; viewModel.providePassword(row.receiver.id, pw) },
+                    )
+                }
+                syncOffsetFor?.let { row ->
+                    SyncOffsetDialog(
+                        receiverName = row.receiver.name,
+                        initialMs = row.syncOffsetMs,
+                        onChange = { ms -> viewModel.setSyncOffset(row.receiver.id, ms) },
+                        onDismiss = { syncOffsetFor = null },
+                    )
+                }
+                if (showSaveGroup) {
+                    SaveGroupDialog(
+                        speakerNames = state.receivers.filter { it.enabled }.map { it.receiver.name },
+                        existingNames = state.groups.map { it.name },
+                        onDismiss = { showSaveGroup = false },
+                        onSave = { name ->
+                            showSaveGroup = false
+                            report(viewModel.saveGroup(name))
+                        },
+                    )
+                }
+                editGroup?.let { group ->
+                    val byId = state.receivers.associateBy { it.receiver.id }
+                    EditGroupDialog(
+                        group = group,
+                        memberNames = group.receiverIds.mapNotNull { byId[it]?.receiver?.name },
+                        offlineCount = group.receiverIds.count { it !in byId },
+                        otherGroupNames = state.groups.filter { it.id != group.id }.map { it.name },
+                        onDismiss = { editGroup = null },
+                        onRename = { name ->
+                            editGroup = null
+                            report(viewModel.renameGroup(group.id, name))
+                        },
+                        onDelete = {
+                            editGroup = null
+                            viewModel.deleteGroup(group.id)
+                        },
                     )
                 }
                 if (showDiagnostics) {
@@ -154,6 +199,28 @@ class MainActivity : ComponentActivity() {
             controller.settings.batteryPromptDismissed = true
             batteryCardVisible = false
         }
+        override fun onMasterVolume(percent: Int) = viewModel.dragMasterVolume(percent)
+        override fun onMasterVolumeDone() = viewModel.endMasterVolumeDrag()
+        override fun onAllSpeakers(on: Boolean) = viewModel.setAllSpeakers(on)
+        override fun onApplyGroup(groupId: String) {
+            if (!viewModel.applyGroup(groupId)) {
+                Toast.makeText(this@MainActivity, "None of this group's speakers is on the network right now", Toast.LENGTH_SHORT).show()
+            }
+        }
+        override fun onSaveGroup() {
+            showSaveGroup = true
+        }
+        override fun onEditGroup(group: SpeakerGroup) {
+            editGroup = group
+        }
+        override fun onSyncOffset(r: ReceiverUi) {
+            syncOffsetFor = r
+        }
+    }
+
+    /** Explains a rejected group change (for example a name that another group already uses). */
+    private fun report(change: GroupChange) {
+        if (change is GroupChange.Rejected) Toast.makeText(this, change.reason, Toast.LENGTH_SHORT).show()
     }
 
     private fun hasRecordPermission() =

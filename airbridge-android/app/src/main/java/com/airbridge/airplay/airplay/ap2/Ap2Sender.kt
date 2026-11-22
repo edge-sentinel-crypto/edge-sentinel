@@ -19,6 +19,7 @@ import com.airbridge.airplay.airplay.SenderIdentity
 import com.airbridge.airplay.airplay.SenderStats
 import com.airbridge.airplay.airplay.StreamSettings
 import com.airbridge.airplay.airplay.StreamTimeline
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.airplay.raop.RaopSender
 import com.airbridge.airplay.codec.AlacEncoder
 import com.airbridge.airplay.codec.BinaryPlist
@@ -30,8 +31,11 @@ import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /** Where AirBridge keeps its HAP identity and PIN/password pairings (Android: private prefs). */
 interface PairingStore {
@@ -91,9 +95,9 @@ class Ap2Sender(
     override val stats = SenderStats()
 
     private var rtsp: RtspClient? = null
-    private var streamer: RtpStreamer? = null
+    @Volatile private var streamer: RtpStreamer? = null
     private var events: EventChannel? = null
-    private var control: ScheduledExecutorService? = null
+    @Volatile private var control: ScheduledExecutorService? = null
     private var timeline: StreamTimeline? = null
     private var audioKey: ByteArray? = null
     private var uri = ""
@@ -104,6 +108,11 @@ class Ap2Sender(
     private var sessionSetUp = false
 
     @Volatile private var closed = false
+
+    @Volatile override var syncOffsetMs: Int = SyncOffset.clamp(config.settings.syncOffsetMs)
+        private set
+    private val resyncRequested = AtomicBoolean(false)
+    private val pendingVolumeDb = AtomicReference<Double?>(null)
 
     /** Parsed GET /info dictionary (empty when the receiver does not answer it). */
     @Volatile var info: Map<String, Any?> = emptyMap()
@@ -135,6 +144,7 @@ class Ap2Sender(
 
             // 3. Session SETUP (timing + event channel).
             val s = RtpStreamer(config.host, timeline.clock, config.name, stats)
+            s.syncOffsetMs = syncOffsetMs
             streamer = s
             s.startResponders()
             val sessionBody = linkedMapOf<String, Any?>(
@@ -301,18 +311,40 @@ class Ap2Sender(
     override fun tick() {
         val s = streamer ?: return
         val t = timeline ?: return
-        if (!closed) s.maybeSendSync(t, config.settings.syncLatencyFrames)
+        if (closed) return
+        // A sync-offset change asks for an immediate sync packet; it is sent here, on the worker
+        // thread that owns the stream, so the HAP session, keys and RTP sequence stay as they are.
+        val force = resyncRequested.getAndSet(false)
+        if (force) s.syncOffsetMs = syncOffsetMs
+        s.maybeSendSync(t, config.settings.syncLatencyFrames, force)
     }
 
-    /** Asynchronous (never blocks the caller, which may be the UI thread); ignored before connect. */
+    override fun setSyncOffsetMs(offsetMs: Int) {
+        syncOffsetMs = SyncOffset.clamp(offsetMs)
+        streamer?.syncOffsetMs = syncOffsetMs
+        resyncRequested.set(true)
+    }
+
+    /**
+     * Asynchronous (never blocks the caller, which may be the UI thread); ignored before connect.
+     * Rapid changes (a master-volume drag) are coalesced: at most one SET_PARAMETER is queued and
+     * it carries the latest value.
+     */
     override fun setVolume(db: Double) {
         val exec = control ?: return
-        exec.execute {
-            try {
-                sendVolume(db)
-            } catch (e: Exception) {
-                AirLog.w(TAG, "${config.name}: volume change failed", e)
+        if (closed) return
+        if (pendingVolumeDb.getAndSet(db) != null) return // a queued send will pick up this value
+        try {
+            exec.execute {
+                val latest = pendingVolumeDb.getAndSet(null) ?: return@execute
+                try {
+                    sendVolume(latest)
+                } catch (e: Exception) {
+                    AirLog.w(TAG, "${config.name}: volume change failed", e)
+                }
             }
+        } catch (e: RejectedExecutionException) {
+            pendingVolumeDb.set(null) // the sender is closing
         }
     }
 

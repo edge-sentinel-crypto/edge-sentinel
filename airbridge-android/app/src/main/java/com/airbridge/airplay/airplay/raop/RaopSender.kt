@@ -19,6 +19,7 @@ import com.airbridge.airplay.airplay.SenderIdentity
 import com.airbridge.airplay.airplay.SenderStats
 import com.airbridge.airplay.airplay.StreamSettings
 import com.airbridge.airplay.airplay.StreamTimeline
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.codec.AlacEncoder
 import com.airbridge.airplay.crypto.X25519KeyPair
 import com.airbridge.airplay.util.AirLog
@@ -28,8 +29,11 @@ import java.net.InetAddress
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /** Per-receiver AirPlay 1 settings derived from its `_raop._tcp` TXT record (or manual entry). */
 data class RaopConfig(
@@ -62,8 +66,8 @@ class RaopSender(
     override val stats = SenderStats()
 
     private var rtsp: RtspClient? = null
-    private var streamer: RtpStreamer? = null
-    private var control: ScheduledExecutorService? = null
+    @Volatile private var streamer: RtpStreamer? = null
+    @Volatile private var control: ScheduledExecutorService? = null
     private var encryption: RaopEncryption? = null
     private var timeline: StreamTimeline? = null
     private var uri = ""
@@ -73,6 +77,11 @@ class RaopSender(
     private var authSetupDone = false
 
     @Volatile private var closed = false
+
+    @Volatile override var syncOffsetMs: Int = SyncOffset.clamp(config.settings.syncOffsetMs)
+        private set
+    private val resyncRequested = AtomicBoolean(false)
+    private val pendingVolumeDb = AtomicReference<Double?>(null)
 
     /** Audio-Latency header from RECORD, if the receiver reports one (frames). */
     @Volatile var reportedLatency: Int? = null
@@ -116,6 +125,7 @@ class RaopSender(
 
             // 4. SETUP the UDP channels.
             val s = RtpStreamer(config.host, timeline.clock, config.name, stats)
+            s.syncOffsetMs = syncOffsetMs
             streamer = s
             s.startResponders()
             val transport = "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;" +
@@ -237,18 +247,40 @@ class RaopSender(
     override fun tick() {
         val s = streamer ?: return
         val t = timeline ?: return
-        if (!closed) s.maybeSendSync(t, config.settings.syncLatencyFrames)
+        if (closed) return
+        // A sync-offset change asks for an immediate sync packet; it is sent here, on the worker
+        // thread that owns the stream, so the session (RTSP, UDP ports, sequence) stays as it is.
+        val force = resyncRequested.getAndSet(false)
+        if (force) s.syncOffsetMs = syncOffsetMs
+        s.maybeSendSync(t, config.settings.syncLatencyFrames, force)
     }
 
-    /** Asynchronous (never blocks the caller, which may be the UI thread); ignored before connect. */
+    override fun setSyncOffsetMs(offsetMs: Int) {
+        syncOffsetMs = SyncOffset.clamp(offsetMs)
+        streamer?.syncOffsetMs = syncOffsetMs
+        resyncRequested.set(true)
+    }
+
+    /**
+     * Asynchronous (never blocks the caller, which may be the UI thread); ignored before connect.
+     * Rapid changes (a master-volume drag) are coalesced: at most one SET_PARAMETER is queued and
+     * it carries the latest value.
+     */
     override fun setVolume(db: Double) {
         val exec = control ?: return
-        exec.execute {
-            try {
-                sendVolume(db)
-            } catch (e: Exception) {
-                AirLog.w(TAG, "${config.name}: volume change failed", e)
+        if (closed) return
+        if (pendingVolumeDb.getAndSet(db) != null) return // a queued send will pick up this value
+        try {
+            exec.execute {
+                val latest = pendingVolumeDb.getAndSet(null) ?: return@execute
+                try {
+                    sendVolume(latest)
+                } catch (e: Exception) {
+                    AirLog.w(TAG, "${config.name}: volume change failed", e)
+                }
             }
+        } catch (e: RejectedExecutionException) {
+            pendingVolumeDb.set(null) // the sender is closing
         }
     }
 

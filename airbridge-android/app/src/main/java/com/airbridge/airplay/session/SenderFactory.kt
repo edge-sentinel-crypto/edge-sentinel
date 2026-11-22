@@ -5,6 +5,7 @@ import com.airbridge.airplay.airplay.AirPlaySender
 import com.airbridge.airplay.airplay.AirPlayVolume
 import com.airbridge.airplay.airplay.SenderIdentity
 import com.airbridge.airplay.airplay.StreamSettings
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.airplay.ap2.Ap2Config
 import com.airbridge.airplay.airplay.ap2.Ap2Sender
 import com.airbridge.airplay.airplay.ap2.PairingStore
@@ -21,6 +22,8 @@ data class ConnectOptions(
     val preference: ProtocolPreference = ProtocolPreference.AUTO,
     val pin: String? = null,
     val password: String? = null,
+    /** Per-speaker sync offset in ms (-250..+250): negative = plays earlier, positive = plays later. */
+    val syncOffsetMs: Int = SyncOffset.DEFAULT_MS,
 )
 
 /** Creates the protocol-specific sender for a receiver (replaceable in tests). */
@@ -37,7 +40,10 @@ class DefaultSenderFactory(
     override fun create(receiver: AirPlayReceiver, protocol: AirPlayProtocol, options: ConnectOptions): AirPlaySender {
         // Hosts are IP literals from mDNS or manual entry, so this never performs a DNS lookup.
         val host = InetAddress.getByName(receiver.host)
-        val streamSettings = settings.copy(initialVolumeDb = AirPlayVolume.percentToDb(options.volumePercent))
+        val streamSettings = settings.copy(
+            initialVolumeDb = AirPlayVolume.percentToDb(options.volumePercent),
+            syncOffsetMs = SyncOffset.clamp(options.syncOffsetMs),
+        )
         return when (protocol) {
             AirPlayProtocol.AIRPLAY_1 -> RaopSender(
                 RaopConfig(

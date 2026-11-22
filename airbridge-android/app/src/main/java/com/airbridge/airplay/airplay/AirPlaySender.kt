@@ -71,6 +71,11 @@ data class StreamSettings(
     val codec: AudioCodec = AudioCodec.ALAC,
     /** Latency announced in sync packets (frames); with the 0x07 flag receivers add 11025, total 2.0 s. */
     val syncLatencyFrames: Int = 77_175,
+    /**
+     * Initial per-speaker sync offset in ms (-250..+250; negative = earlier, positive = later).
+     * It shifts the announced latency by round(ms x 44.1) frames; see [SyncOffset].
+     */
+    val syncOffsetMs: Int = SyncOffset.DEFAULT_MS,
     /** AirPlay 2 SETUP latency bounds (frames). */
     val ap2LatencyMin: Int = 11_025,
     val ap2LatencyMax: Int = 88_200,
@@ -106,6 +111,17 @@ interface AirPlaySender : Closeable {
     fun tick()
 
     fun setVolume(db: Double)
+
+    /** Current per-speaker sync offset in ms (negative = plays earlier, positive = plays later). */
+    val syncOffsetMs: Int
+
+    /**
+     * Changes the sync offset without reconnecting. On a connected sender the worker thread's next
+     * [tick] sends a sync packet at once with the shifted latency, so the receiver re-aligns while
+     * the RTSP/HAP session and the audio stream keep running. Before [connect] it only sets the
+     * value used for the first sync packet. Thread-safe; never blocks.
+     */
+    fun setSyncOffsetMs(offsetMs: Int)
 
     /** Flushes the receiver buffer; the next frame sent starts a new run (marker bit set). */
     fun flush(nextFrameIndex: Long)

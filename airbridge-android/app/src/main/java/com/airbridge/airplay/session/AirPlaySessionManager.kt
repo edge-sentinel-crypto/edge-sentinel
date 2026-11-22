@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * Fans captured audio out to 1..N speakers. All speakers share one [StreamTimeline] (same RTP
  * clock and NTP anchor) so they play in step; each speaker has its own [ReceiverSession] (thread,
- * queue, protocol, volume). Speakers can be added and removed while audio is flowing.
+ * queue, protocol, volume, sync offset). Speakers can be added and removed while audio is flowing.
  */
 class AirPlaySessionManager(
     private val factory: SenderFactory,
@@ -77,6 +77,14 @@ class AirPlaySessionManager(
 
     fun setVolume(receiverId: String, percent: Int) {
         sessions[receiverId]?.setVolume(percent)
+    }
+
+    /**
+     * Changes one speaker's sync offset while it plays (negative ms = earlier, positive = later).
+     * No reconnect: its sender sends a sync packet with the shifted latency on its next tick.
+     */
+    fun setSyncOffsetMs(receiverId: String, offsetMs: Int) {
+        sessions[receiverId]?.setSyncOffsetMs(offsetMs)
     }
 
     fun providePin(receiverId: String, pin: String) {

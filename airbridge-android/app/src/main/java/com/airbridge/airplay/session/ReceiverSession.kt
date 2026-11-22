@@ -9,6 +9,7 @@ import com.airbridge.airplay.airplay.AuthenticationFailedAirPlayException
 import com.airbridge.airplay.airplay.PasswordRequiredException
 import com.airbridge.airplay.airplay.PinRequiredException
 import com.airbridge.airplay.airplay.StreamTimeline
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.mdns.AirPlayReceiver
 import com.airbridge.airplay.mdns.ProtocolPreference
 import com.airbridge.airplay.util.AirLog
@@ -32,23 +33,31 @@ data class ReceiverStatus(
     val packetsSent: Long = 0,
     val retransmits: Long = 0,
     val droppedFrames: Long = 0,
+    /** Sync offset in ms applied to this speaker (negative = earlier, positive = later). */
+    val syncOffsetMs: Int = 0,
 )
 
 /**
  * One speaker inside a stream: its own worker thread and bounded frame queue, so a slow or dead
  * speaker can never stall the capture pipeline or the other speakers. Handles connect, protocol
  * fallback (AirPlay 2 -> AirPlay 1 when both are advertised), reconnect with backoff, PIN and
- * password prompts, volume and teardown.
+ * password prompts, volume, sync offset and teardown.
  */
 class ReceiverSession(
     val receiver: AirPlayReceiver,
-    @Volatile var options: ConnectOptions,
+    options: ConnectOptions,
     private val factory: SenderFactory,
     private val timeline: StreamTimeline,
     private val nextFrameIndex: () -> Long,
     private val onStatus: (ReceiverStatus) -> Unit,
     queueCapacity: Int = 96,
 ) {
+    private val optionsLock = Any()
+
+    /** Current options; changed only through [updateOptions] so concurrent changes are not lost. */
+    @Volatile var options: ConnectOptions = options
+        private set
+
     private val queue = ArrayBlockingQueue<AudioFrame>(queueCapacity)
     private val dropped = AtomicLong()
     @Volatile private var running = true
@@ -73,15 +82,30 @@ class ReceiverSession(
         }
     }
 
+    private fun updateOptions(change: (ConnectOptions) -> ConnectOptions): ConnectOptions =
+        synchronized(optionsLock) { change(options).also { options = it } }
+
     fun setVolume(percent: Int) {
-        options = options.copy(volumePercent = percent)
+        updateOptions { it.copy(volumePercent = percent) }
         sender?.let { s -> if (state == SessionState.STREAMING) s.setVolume(AirPlayVolume.percentToDb(percent)) }
+        publish()
+    }
+
+    /**
+     * Live sync-offset change: the connected sender keeps its RTSP/HAP session and sends a sync
+     * packet with the shifted latency on its next tick. While connecting or reconnecting, the new
+     * value is applied as soon as the connection is up.
+     */
+    fun setSyncOffsetMs(offsetMs: Int) {
+        val ms = SyncOffset.clamp(offsetMs)
+        updateOptions { it.copy(syncOffsetMs = ms) }
+        sender?.setSyncOffsetMs(ms)
         publish()
     }
 
     /** Supplies a PIN or password and reconnects immediately. */
     fun retryWith(pin: String? = options.pin, password: String? = options.password) {
-        options = options.copy(pin = pin, password = password)
+        updateOptions { it.copy(pin = pin, password = password) }
         retryLock.withLock {
             retryRequested = true
             retrySignal.signalAll()
@@ -147,17 +171,24 @@ class ReceiverSession(
         val order = if (canFallBack) listOf(primary, AirPlayProtocol.AIRPLAY_1) else listOf(primary)
         for ((i, protocol) in order.withIndex()) {
             setState(SessionState.CONNECTING, "Connecting (${protocol.label})", protocol)
+            val used = options
             val s = try {
-                factory.create(receiver, protocol, options)
+                factory.create(receiver, protocol, used)
             } catch (e: Exception) {
                 setState(SessionState.FAILED, "Cannot reach ${receiver.host}: ${e.message}")
                 return false
             }
             try {
+                s.setSyncOffsetMs(used.syncOffsetMs)
                 s.connect(timeline, nextFrameIndex())
                 sender = s
                 activeProtocol = protocol
                 setState(SessionState.STREAMING, null, protocol)
+                // Volume or sync-offset changes made while connecting were not part of this
+                // connection's setup: apply the latest values now.
+                val now = options
+                if (now.volumePercent != used.volumePercent) s.setVolume(AirPlayVolume.percentToDb(now.volumePercent))
+                if (now.syncOffsetMs != s.syncOffsetMs) s.setSyncOffsetMs(now.syncOffsetMs)
                 return true
             } catch (e: PinRequiredException) {
                 s.close()
@@ -171,13 +202,13 @@ class ReceiverSession(
                 s.close()
                 if (options.pin != null) {
                     // Wrong code: ask the receiver for a fresh one, then wait for the user again.
-                    options = options.copy(pin = null)
+                    updateOptions { it.copy(pin = null) }
                     val again = connectOnce()
                     if (state == SessionState.NEEDS_PIN) setState(SessionState.NEEDS_PIN, "Wrong code. Enter the new code shown by ${receiver.name}", protocol)
                     return again
                 }
                 if (options.password != null) {
-                    options = options.copy(password = null)
+                    updateOptions { it.copy(password = null) }
                     setState(SessionState.NEEDS_PASSWORD, "Wrong password for ${receiver.name}", protocol)
                     return false
                 }
@@ -259,6 +290,7 @@ class ReceiverSession(
             packetsSent = stats?.packetsSent ?: 0,
             retransmits = stats?.retransmitted ?: 0,
             droppedFrames = dropped.get(),
+            syncOffsetMs = options.syncOffsetMs,
         )
     }
 

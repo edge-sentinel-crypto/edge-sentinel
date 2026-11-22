@@ -4,11 +4,15 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -24,6 +28,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
@@ -54,6 +59,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -66,18 +72,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.airbridge.airplay.StreamPhase
 import com.airbridge.airplay.airplay.AirPlayProtocol
+import com.airbridge.airplay.airplay.SyncOffset
 import com.airbridge.airplay.audio.CaptureHealthMonitor
 import com.airbridge.airplay.audio.LevelMeter
 import com.airbridge.airplay.mdns.AirPlayReceiver
 import com.airbridge.airplay.mdns.ProtocolPreference
+import com.airbridge.airplay.multiroom.SpeakerGroup
 import com.airbridge.airplay.session.SessionState
 import com.airbridge.airplay.ui.theme.AirBridgeColors
+import kotlin.math.roundToInt
 
 /** Callbacks from the screen to the activity / view model. */
 interface ScreenActions {
@@ -95,6 +110,20 @@ interface ScreenActions {
     fun onShowDiagnostics()
     fun onBatteryAllow()
     fun onBatteryDismiss()
+
+    /** Master slider moved (0..100); called on every step of a drag. */
+    fun onMasterVolume(percent: Int)
+
+    /** Master slider released. */
+    fun onMasterVolumeDone()
+
+    /** Quick toggle: true = switch on every listed speaker, false = switch every speaker off. */
+    fun onAllSpeakers(on: Boolean)
+
+    fun onApplyGroup(groupId: String)
+    fun onSaveGroup()
+    fun onEditGroup(group: SpeakerGroup)
+    fun onSyncOffset(r: ReceiverUi)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -152,6 +181,8 @@ fun AirBridgeScreen(state: MainUiState, showBatteryCard: Boolean, actions: Scree
             if (state.receivers.isEmpty()) {
                 item(key = "empty") { EmptyReceivers(actions::onAddManual) }
             } else {
+                item(key = "multiroom") { MultiRoomBar(state, actions) }
+                if (state.enabledCount > 0) item(key = "master") { MasterVolumeCard(state, actions) }
                 items(state.receivers, key = { it.receiver.id }) { row -> ReceiverCard(row, state.stream.phase, actions) }
             }
             item(key = "footer") {
@@ -456,6 +487,10 @@ fun ReceiverCard(row: ReceiverUi, phase: StreamPhase, actions: ScreenActions) {
                             Spacer(Modifier.width(6.dp))
                             Icon(Icons.Filled.Lock, contentDescription = "Needs a code or password", modifier = Modifier.size(15.dp), tint = AirBridgeColors.Amber)
                         }
+                        if (row.syncOffsetMs != 0) {
+                            Spacer(Modifier.width(6.dp))
+                            SyncOffsetBadge(row.syncOffsetMs)
+                        }
                     }
                     Spacer(Modifier.height(3.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -579,9 +614,205 @@ private fun ReceiverMenu(row: ReceiverUi, actions: ScreenActions) {
                     onClick = { open = false; actions.onPreference(row.receiver, pref) },
                 )
             }
+            HorizontalDivider()
+            DropdownMenuItem(
+                text = { Text("Sync offset") },
+                leadingIcon = { Icon(AppIcons.Tune, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                trailingIcon = {
+                    Text(
+                        if (row.syncOffsetMs == 0) "0 ms" else SyncOffset.badge(row.syncOffsetMs),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                onClick = { open = false; actions.onSyncOffset(row) },
+            )
             if (row.receiver.manual) {
                 HorizontalDivider()
                 DropdownMenuItem(text = { Text("Remove speaker") }, onClick = { open = false; actions.onRemoveManual(row.receiver) })
+            }
+        }
+    }
+}
+
+/** Small pill on a speaker card when its sync offset is not 0 ("+40 ms" / "-25 ms"). */
+@Composable
+private fun SyncOffsetBadge(ms: Int) {
+    val description = "Sync offset " + SyncOffset.label(ms)
+    Box(
+        Modifier.clip(RoundedCornerShape(6.dp))
+            .background(AirBridgeColors.Teal.copy(alpha = 0.14f))
+            .semantics { contentDescription = description }
+            .padding(horizontal = 6.dp, vertical = 2.dp),
+    ) {
+        Text(SyncOffset.badge(ms), style = MaterialTheme.typography.labelSmall, color = Color(0xFF9FEBDD), maxLines = 1)
+    }
+}
+
+/**
+ * Multi-room bar above the speaker list: the All on / All off quick toggle, one chip per saved
+ * group (tap: play that group; long-press: rename or delete) and "Save group". Chips flow onto a
+ * second line instead of scrolling sideways, so every group stays visible.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MultiRoomBar(state: MainUiState, actions: ScreenActions) {
+    val allOn = state.allOn
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        BarChip(
+            label = if (allOn) "All off" else "All on",
+            icon = AppIcons.SpeakerGroup,
+            tonal = true,
+            contentDescription = if (allOn) "Turn all speakers off" else "Turn all speakers on",
+            onClick = { actions.onAllSpeakers(!allOn) },
+        )
+        state.groupChips.forEach { chip ->
+            val name = chip.group.name
+            val label = if (chip.offline > 0) "$name · ${chip.available}/${chip.total}" else name
+            BarChip(
+                label = label,
+                icon = if (chip.active) Icons.Filled.Check else null,
+                selected = chip.active,
+                dimmed = chip.available == 0, // still long-pressable, so it can be renamed or deleted
+                contentDescription = "Group $name" + (if (chip.offline > 0) ", ${chip.offline} of ${chip.total} speakers not found" else ""),
+                onClick = { actions.onApplyGroup(chip.group.id) },
+                onLongClick = { actions.onEditGroup(chip.group) },
+                onLongClickLabel = "Rename or delete",
+            )
+        }
+        BarChip(
+            label = "Save group",
+            icon = Icons.Filled.Add,
+            enabled = state.enabledCount > 0,
+            contentDescription = "Save the speakers that are on as a group",
+            onClick = actions::onSaveGroup,
+        )
+    }
+}
+
+/** Compact Material 3 style chip with optional long-press (used by the multi-room bar). */
+@OptIn(ExperimentalFoundationApi::class) // combinedClickable (tap + long-press)
+@Composable
+private fun BarChip(
+    label: String,
+    icon: ImageVector?,
+    onClick: () -> Unit,
+    selected: Boolean = false,
+    tonal: Boolean = false,
+    enabled: Boolean = true,
+    dimmed: Boolean = false,
+    contentDescription: String? = null,
+    onLongClick: (() -> Unit)? = null,
+    onLongClickLabel: String? = null,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val container = when {
+        selected -> AirBridgeColors.Blue.copy(alpha = 0.24f)
+        tonal -> AirBridgeColors.Blue.copy(alpha = 0.12f)
+        else -> MaterialTheme.colorScheme.surfaceContainer
+    }
+    val outline = when {
+        selected -> AirBridgeColors.Blue.copy(alpha = 0.75f)
+        tonal -> AirBridgeColors.Blue.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.outline
+    }
+    val faded = !enabled || dimmed
+    val content = when {
+        faded -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+        selected || tonal -> Color(0xFFDCE6FF)
+        else -> MaterialTheme.colorScheme.onSurface
+    }
+    Row(
+        Modifier
+            .minimumInteractiveComponentSize()
+            .height(34.dp)
+            .clip(shape)
+            .background(if (faded) MaterialTheme.colorScheme.surfaceContainerLow else container)
+            .border(1.dp, if (faded) MaterialTheme.colorScheme.outlineVariant else outline, shape)
+            .combinedClickable(
+                enabled = enabled,
+                role = Role.Button,
+                onLongClickLabel = onLongClickLabel,
+                onLongClick = onLongClick,
+                onClick = onClick,
+            )
+            .semantics {
+                this.selected = selected
+                if (contentDescription != null) this.contentDescription = contentDescription
+            }
+            .padding(start = if (icon != null) 10.dp else 14.dp, end = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (icon != null) {
+            Icon(icon, contentDescription = null, tint = content, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(label, style = MaterialTheme.typography.labelLarge, color = content, maxLines = 1)
+    }
+}
+
+/**
+ * Master volume for the speakers that are on. Shows the loudest speaker's level; dragging scales
+ * every speaker and keeps their balance. While dragging, the thumb follows the finger (local
+ * value); otherwise it shows the derived level, so speaker sliders never feed back into it.
+ */
+@Composable
+private fun MasterVolumeCard(state: MainUiState, actions: ScreenActions) {
+    var dragging by remember { mutableStateOf(false) }
+    var local by remember { mutableFloatStateOf(state.masterVolume.toFloat()) }
+    val value = if (dragging) local else state.masterVolume.toFloat()
+    val count = state.enabledCount
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(start = 16.dp, end = 12.dp, top = 12.dp, bottom = 2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Master volume", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(
+                    if (count == 1) "1 speaker on" else "$count speakers · balance kept",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(AppIcons.VolumeUp, contentDescription = null, tint = AirBridgeColors.Teal, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Slider(
+                    value = value,
+                    onValueChange = {
+                        dragging = true
+                        local = it
+                        actions.onMasterVolume(it.roundToInt())
+                    },
+                    onValueChangeFinished = {
+                        dragging = false
+                        actions.onMasterVolumeDone()
+                    },
+                    valueRange = 0f..100f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color.White,
+                        activeTrackColor = AirBridgeColors.Teal,
+                        inactiveTrackColor = Color(0x2EFFFFFF),
+                        activeTickColor = Color.Transparent,
+                        inactiveTickColor = Color.Transparent,
+                    ),
+                    modifier = Modifier.weight(1f).semantics {
+                        contentDescription = "Master volume"
+                        stateDescription = "${value.roundToInt()} percent"
+                    },
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${value.roundToInt()}%",
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.width(40.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

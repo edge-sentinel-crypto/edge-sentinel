@@ -33,6 +33,19 @@ class RtpStreamer(
     @Volatile var remoteDataPort = 0
     @Volatile var remoteControlPort = 0
 
+    /**
+     * Per-speaker sync offset in ms, applied to every sync packet (negative = plays earlier,
+     * positive = plays later; clamped to -250..+250). See [SyncOffset].
+     */
+    @Volatile var syncOffsetMs: Int = SyncOffset.DEFAULT_MS
+        set(value) {
+            field = SyncOffset.clamp(value)
+        }
+
+    /** Latency (frames) announced in the most recent sync packet; 0 before the first one. */
+    @Volatile var lastSyncLatencyFrames: Int = 0
+        private set
+
     @Volatile private var closed = false
     private var timingThread: Thread? = null
     private var controlThread: Thread? = null
@@ -105,20 +118,28 @@ class RtpStreamer(
         stats.bytesSent += packet.size
     }
 
-    /** Sends a sync packet once per second (immediately when [force] or after a flush). */
-    fun maybeSendSync(timeline: StreamTimeline, latencyFrames: Int, force: Boolean = false) {
+    /**
+     * Sends a sync packet once per second (immediately when [force] or after a flush). The packet
+     * announces [baseLatencyFrames] shifted by [syncOffsetMs]: it says that the frame with RTP time
+     * `rtpNow - latency` is due at the current NTP time, so a larger latency plays later.
+     */
+    @Synchronized
+    fun maybeSendSync(timeline: StreamTimeline, baseLatencyFrames: Int, force: Boolean = false) {
         if (remoteControlPort == 0) return
         val nowNanos = clock.nowNanos()
         if (!force && !firstSync && nowNanos - lastSyncNanos < 1_000_000_000L) return
+        val latency = SyncOffset.latencyFrames(baseLatencyFrames, syncOffsetMs, timeline.sampleRate)
         val rtpNow = timeline.rtpAt(nowNanos)
-        val pkt = RtpPackets.sync(firstSync, rtpNow - latencyFrames, NtpClock.toNtp64(nowNanos), rtpNow)
+        val pkt = RtpPackets.sync(firstSync, rtpNow - latency, NtpClock.toNtp64(nowNanos), rtpNow)
         controlSocket.send(DatagramPacket(pkt, pkt.size, remote, remoteControlPort))
         stats.syncPacketsSent++
         firstSync = false
         lastSyncNanos = nowNanos
+        lastSyncLatencyFrames = latency
     }
 
     /** After FLUSH the next sync packet is flagged as the first of a new run. */
+    @Synchronized
     fun resetSync() {
         firstSync = true
     }

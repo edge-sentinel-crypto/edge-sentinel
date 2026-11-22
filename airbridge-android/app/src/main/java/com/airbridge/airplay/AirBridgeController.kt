@@ -8,8 +8,10 @@ import com.airbridge.airplay.mdns.AirPlayReceiver
 import com.airbridge.airplay.mdns.DiscoveryManager
 import com.airbridge.airplay.mdns.ProtocolPreference
 import com.airbridge.airplay.mdns.ReceiverRegistry
+import com.airbridge.airplay.multiroom.GroupChange
+import com.airbridge.airplay.multiroom.MultiRoomController
+import com.airbridge.airplay.multiroom.SpeakerGroup
 import com.airbridge.airplay.session.AirPlaySessionManager
-import com.airbridge.airplay.session.ConnectOptions
 import com.airbridge.airplay.session.DefaultSenderFactory
 import com.airbridge.airplay.util.AirLog
 import com.airbridge.airplay.util.NtpClock
@@ -19,7 +21,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /** Streaming lifecycle shown in the hero card. */
@@ -29,8 +30,9 @@ data class StreamUiState(val phase: StreamPhase = StreamPhase.IDLE, val message:
 
 /**
  * Process-wide state holder shared by the activity (UI) and the capture service. Keeps the
- * discovered receivers, which speakers are switched on, their volumes and protocol choices, and
- * drives the [AirPlaySessionManager] when capture starts and stops.
+ * discovered receivers and the streaming state, and drives the [AirPlaySessionManager] when
+ * capture starts and stops. Which speakers play, their volumes (per speaker and master), protocol
+ * choices, sync offsets and saved groups live in [multiRoom].
  */
 class AirBridgeController(app: Application) {
     val settings = AppSettings(app)
@@ -49,27 +51,20 @@ class AirBridgeController(app: Application) {
     private val _health = MutableStateFlow(CaptureHealthMonitor.Status.STARTING)
     val health: StateFlow<CaptureHealthMonitor.Status> = _health.asStateFlow()
 
-    private val _selected = MutableStateFlow(settings.selectedReceivers())
-    val selected: StateFlow<Set<String>> = _selected.asStateFlow()
+    /** Speaker selection, volumes, master volume, sync offsets and groups (pure, unit-tested). */
+    val multiRoom = MultiRoomController(settings, registry, sessions)
 
-    private val _volumes = MutableStateFlow<Map<String, Int>>(emptyMap())
-    val volumes: StateFlow<Map<String, Int>> = _volumes.asStateFlow()
-
-    private val _preferences = MutableStateFlow<Map<String, ProtocolPreference>>(emptyMap())
-    val preferences: StateFlow<Map<String, ProtocolPreference>> = _preferences.asStateFlow()
-
-    /** Passwords typed this session (kept in memory only, never written to disk). */
-    private val sessionPasswords = HashMap<String, String>()
+    val selected: StateFlow<Set<String>> get() = multiRoom.selected
+    val volumes: StateFlow<Map<String, Int>> get() = multiRoom.volumes
+    val preferences: StateFlow<Map<String, ProtocolPreference>> get() = multiRoom.preferences
+    val syncOffsets: StateFlow<Map<String, Int>> get() = multiRoom.syncOffsets
+    val groups: StateFlow<List<SpeakerGroup>> get() = multiRoom.groups
 
     init {
         settings.manualReceivers().forEach { registry.addManual(it) }
         // Speakers that are switched on but appear (or re-appear) while streaming join automatically.
         scope.launch {
-            registry.receivers.collect { list ->
-                if (!sessions.isStreaming) return@collect
-                val on = _selected.value
-                list.filter { it.id in on && !sessions.isConnected(it.id) }.forEach { connect(it) }
-            }
+            registry.receivers.collect { list -> multiRoom.onReceiversChanged(list) }
         }
     }
 
@@ -77,34 +72,32 @@ class AirBridgeController(app: Application) {
     fun stopDiscovery() = discovery.stop()
     fun refreshDiscovery() = discovery.restart()
 
-    fun volumeOf(id: String): Int = _volumes.value[id] ?: settings.volume(id)
-    fun preferenceOf(id: String): ProtocolPreference = _preferences.value[id] ?: settings.preference(id)
+    fun volumeOf(id: String): Int = multiRoom.volumeOf(id)
+    fun preferenceOf(id: String): ProtocolPreference = multiRoom.preferenceOf(id)
+    fun syncOffsetOf(id: String): Int = multiRoom.syncOffsetOf(id)
 
-    fun setReceiverEnabled(receiver: AirPlayReceiver, enabled: Boolean) {
-        _selected.update { if (enabled) it + receiver.id else it - receiver.id }
-        settings.setSelectedReceivers(_selected.value)
-        if (!sessions.isStreaming) return
-        if (enabled) connect(receiver) else sessions.disconnect(receiver.id)
-    }
+    fun setReceiverEnabled(receiver: AirPlayReceiver, enabled: Boolean) = multiRoom.setReceiverEnabled(receiver, enabled)
 
-    fun setVolume(id: String, percent: Int) {
-        _volumes.update { it + (id to percent) }
-        settings.setVolume(id, percent)
-        sessions.setVolume(id, percent)
-    }
+    fun setVolume(id: String, percent: Int) = multiRoom.setVolume(id, percent)
 
-    fun setPreference(receiver: AirPlayReceiver, pref: ProtocolPreference) {
-        _preferences.update { it + (receiver.id to pref) }
-        settings.setPreference(receiver.id, pref)
-        if (sessions.isConnected(receiver.id)) connect(receiver)
-    }
+    fun setPreference(receiver: AirPlayReceiver, pref: ProtocolPreference) = multiRoom.setPreference(receiver, pref)
+
+    /** Live per-speaker sync offset (ms; negative = earlier, positive = later); no reconnect. */
+    fun setSyncOffset(id: String, ms: Int): Int = multiRoom.setSyncOffset(id, ms)
+
+    fun dragMasterVolume(percent: Int) = multiRoom.dragMasterTo(percent)
+    fun endMasterVolumeDrag() = multiRoom.endMasterDrag()
+
+    fun turnAllOn() = multiRoom.turnAllOn()
+    fun turnAllOff() = multiRoom.turnAllOff()
+    fun applyGroup(groupId: String): Boolean = multiRoom.applyGroup(groupId)
+    fun saveGroup(name: String): GroupChange = multiRoom.saveGroup(name)
+    fun renameGroup(groupId: String, name: String): GroupChange = multiRoom.renameGroup(groupId, name)
+    fun deleteGroup(groupId: String) = multiRoom.deleteGroup(groupId)
 
     fun providePin(id: String, pin: String) = sessions.providePin(id, pin)
 
-    fun providePassword(id: String, password: String) {
-        sessionPasswords[id] = password
-        sessions.providePassword(id, password)
-    }
+    fun providePassword(id: String, password: String) = multiRoom.providePassword(id, password)
 
     fun retry(id: String) = sessions.retry(id)
 
@@ -119,21 +112,6 @@ class AirBridgeController(app: Application) {
         setReceiverEnabled(receiver, false)
         settings.removeManualReceiver(receiver.host, receiver.raopPort ?: receiver.airplayPort ?: 0)
         registry.removeManual(receiver.id)
-    }
-
-    private fun connect(receiver: AirPlayReceiver) {
-        try {
-            sessions.connect(
-                receiver,
-                ConnectOptions(
-                    volumePercent = volumeOf(receiver.id),
-                    preference = preferenceOf(receiver.id),
-                    password = sessionPasswords[receiver.id],
-                ),
-            )
-        } catch (e: IllegalStateException) {
-            AirLog.w(TAG, "connect ignored: ${e.message}")
-        }
     }
 
     // ------------------------------------------------------------ capture service callbacks
@@ -153,8 +131,7 @@ class AirBridgeController(app: Application) {
 
     fun onCaptureStarted() {
         _stream.value = StreamUiState(StreamPhase.STREAMING)
-        val on = _selected.value
-        registry.snapshot().filter { it.id in on }.forEach { connect(it) }
+        multiRoom.connectSelected()
     }
 
     fun onCaptureFailed(message: String) {
