@@ -35,16 +35,30 @@ data class ReceiverStatus(
     val droppedFrames: Long = 0,
     /** Sync offset in ms applied to this speaker (negative = earlier, positive = later). */
     val syncOffsetMs: Int = 0,
-)
+    /**
+     * Set when Auto mode tried this protocol first and it failed, so the speaker now plays over
+     * [protocol] instead: AIRPLAY_2 when an AirPlay 2 speaker fell back to AirPlay 1.
+     */
+    val fallbackFrom: AirPlayProtocol? = null,
+    /** Why the first protocol failed (for diagnostics), when [fallbackFrom] is set. */
+    val fallbackReason: String? = null,
+) {
+    /** True while the speaker plays over AirPlay 1 because AirPlay 2 failed (Auto mode). */
+    val isFallback: Boolean get() = fallbackFrom != null && protocol != null && protocol != fallbackFrom
+
+    /** Protocol label for the UI: "AirPlay 2", "AirPlay 1", or "AirPlay 1 (fallback)". */
+    val protocolLabel: String? get() = protocol?.let { if (isFallback) "${it.label} (fallback)" else it.label }
+}
 
 /**
  * One speaker inside a stream: its own worker thread and bounded frame queue, so a slow or dead
  * speaker can never stall the capture pipeline or the other speakers. Handles connect, protocol
- * fallback (AirPlay 2 -> AirPlay 1 when both are advertised), reconnect with backoff, PIN and
- * password prompts, volume, sync offset and teardown.
+ * fallback (AirPlay 2 -> AirPlay 1 when both are advertised, shown as "AirPlay 1 (fallback)"),
+ * reconnect with backoff, a new address announced by the speaker, PIN and password prompts,
+ * volume, sync offset and teardown.
  */
 class ReceiverSession(
-    val receiver: AirPlayReceiver,
+    receiver: AirPlayReceiver,
     options: ConnectOptions,
     private val factory: SenderFactory,
     private val timeline: StreamTimeline,
@@ -53,6 +67,13 @@ class ReceiverSession(
     queueCapacity: Int = 96,
 ) {
     private val optionsLock = Any()
+
+    /**
+     * The speaker as last announced (same id; its address, ports or TXT may change). Every
+     * connection attempt reads it afresh, so a reconnect goes to the speaker's current address.
+     */
+    @Volatile var receiver: AirPlayReceiver = receiver
+        private set
 
     /** Current options; changed only through [updateOptions] so concurrent changes are not lost. */
     @Volatile var options: ConnectOptions = options
@@ -66,10 +87,17 @@ class ReceiverSession(
         private set
     @Volatile private var message: String? = null
     @Volatile private var activeProtocol: AirPlayProtocol? = null
+    @Volatile private var fallbackFrom: AirPlayProtocol? = null
+    @Volatile private var fallbackReason: String? = null
     private val thread = Thread({ run() }, "airplay-session-${receiver.name}").apply { isDaemon = true }
     private val retryLock = ReentrantLock()
     private val retrySignal = retryLock.newCondition()
+
+    /** Reconnect now: set by [retryWith]; also ends a running stream (new PIN or password). */
     @Volatile private var retryRequested = false
+
+    /** Retry the connection now, but never interrupt a stream that is playing (new address). */
+    @Volatile private var wakeRequested = false
 
     fun start() = thread.start()
 
@@ -112,6 +140,33 @@ class ReceiverSession(
         }
     }
 
+    /**
+     * The speaker announced itself again, possibly from a new IP address or port (same id). The
+     * session keeps its options (volume, sync offset, PIN/password) and the speaker keeps its
+     * pairing, which is stored under the id. A stream that is playing keeps its connection; the
+     * next connection attempt uses the new address. A session that is waiting to retry (after a
+     * failed or lost connection) retries at once at the new address. Returns true when the
+     * address or a port changed.
+     */
+    fun updateReceiver(updated: AirPlayReceiver): Boolean {
+        require(updated.id == receiver.id) { "receiver id changed from ${receiver.id} to ${updated.id}" }
+        val old = receiver
+        receiver = updated
+        val moved = old.host != updated.host || old.raopPort != updated.raopPort || old.airplayPort != updated.airplayPort
+        if (moved) {
+            AirLog.i(TAG, "${updated.name}: now at ${updated.host} (was ${old.host})")
+            val s = state
+            if (s == SessionState.RETRYING || s == SessionState.FAILED) {
+                retryLock.withLock {
+                    wakeRequested = true
+                    retrySignal.signalAll()
+                }
+            }
+        }
+        if (moved || old.name != updated.name) publish()
+        return moved
+    }
+
     fun stop() {
         running = false
         retryLock.withLock { retrySignal.signalAll() }
@@ -152,30 +207,35 @@ class ReceiverSession(
 
     private fun waitForRetry(ms: Long) {
         retryLock.withLock {
-            if (!retryRequested && running) {
+            if (!retryRequested && !wakeRequested && running) {
                 try {
                     if (ms == Long.MAX_VALUE) retrySignal.await() else retrySignal.await(ms, TimeUnit.MILLISECONDS)
                 } catch (_: InterruptedException) {
                 }
             }
             retryRequested = false
+            wakeRequested = false
         }
     }
 
     private fun connectOnce(): Boolean {
         closeSender()
         queue.clear()
-        val primary = receiver.protocolFor(options.preference)
+        val target = receiver // one consistent address for this attempt
+        fallbackFrom = null
+        fallbackReason = null
+        val primary = target.protocolFor(options.preference)
         val canFallBack = options.preference == ProtocolPreference.AUTO &&
-            primary == AirPlayProtocol.AIRPLAY_2 && receiver.supportsAirPlay1
+            primary == AirPlayProtocol.AIRPLAY_2 && target.supportsAirPlay1
         val order = if (canFallBack) listOf(primary, AirPlayProtocol.AIRPLAY_1) else listOf(primary)
+        var firstFailure: String? = null
         for ((i, protocol) in order.withIndex()) {
             setState(SessionState.CONNECTING, "Connecting (${protocol.label})", protocol)
             val used = options
             val s = try {
-                factory.create(receiver, protocol, used)
+                factory.create(target, protocol, used)
             } catch (e: Exception) {
-                setState(SessionState.FAILED, "Cannot reach ${receiver.host}: ${e.message}")
+                setState(SessionState.FAILED, "Cannot reach ${target.host}: ${e.message}")
                 return false
             }
             try {
@@ -183,6 +243,9 @@ class ReceiverSession(
                 s.connect(timeline, nextFrameIndex())
                 sender = s
                 activeProtocol = protocol
+                // Auto mode reached the speaker only through its second protocol: say so on its card.
+                fallbackFrom = if (i > 0) order[0] else null
+                fallbackReason = if (i > 0) firstFailure else null
                 setState(SessionState.STREAMING, null, protocol)
                 // Volume or sync-offset changes made while connecting were not part of this
                 // connection's setup: apply the latest values now.
@@ -218,7 +281,8 @@ class ReceiverSession(
                 s.close()
                 AirLog.w(TAG, "${receiver.name}: ${protocol.label} failed: ${e.message}")
                 if (i < order.size - 1) {
-                    AirLog.i(TAG, "${receiver.name}: falling back to AirPlay 1")
+                    AirLog.i(TAG, "${receiver.name}: falling back to ${order[i + 1].label}")
+                    if (firstFailure == null) firstFailure = "${protocol.label} failed: ${e.message ?: e.javaClass.simpleName}"
                     continue
                 }
                 setState(SessionState.FAILED, e.message, protocol)
@@ -291,6 +355,8 @@ class ReceiverSession(
             retransmits = stats?.retransmitted ?: 0,
             droppedFrames = dropped.get(),
             syncOffsetMs = options.syncOffsetMs,
+            fallbackFrom = fallbackFrom,
+            fallbackReason = fallbackReason,
         )
     }
 

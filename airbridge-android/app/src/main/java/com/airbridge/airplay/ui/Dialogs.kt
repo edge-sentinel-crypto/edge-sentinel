@@ -198,7 +198,18 @@ fun PasswordDialog(receiverName: String, message: String?, onDismiss: () -> Unit
     )
 }
 
-/** Diagnostics + help sheet: capture status, the Spotify limitation, per-speaker counters, log tail. */
+/**
+ * Help text for silent capture. Android's playback capture works with Spotify and most media apps
+ * when the app and the phone allow capture; only an app (or app version) that opts out gives silence.
+ */
+internal const val SILENT_CAPTURE_HELP =
+    "AirBridge uses Android's standard playback capture (Android 10 and newer; no root and no workarounds). " +
+        "It works with Spotify and most other media apps when the app and the phone allow capture. " +
+        "An app, or one version of it, can opt out of capture (allowAudioPlaybackCapture=\"false\"); Android then " +
+        "gives every capture app silence for that app, and AirBridge warns after about 3 seconds. " +
+        "Check that app's settings, try another player, or use Spotify Connect or Google Cast where your speaker supports it."
+
+/** Diagnostics + help sheet: capture status and format, capture help, per-speaker counters, log tail. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DiagnosticsSheet(state: MainUiState, logLines: List<String>, onCopyLog: () -> Unit, onDismiss: () -> Unit) {
@@ -211,12 +222,12 @@ fun DiagnosticsSheet(state: MainUiState, logLines: List<String>, onCopyLog: () -
             Text("Diagnostics & help", style = MaterialTheme.typography.titleLarge)
             Text("Capture: ${captureText(state)}", style = MaterialTheme.typography.bodyMedium)
 
+            HelpBlock("Music plays, but the speakers stay silent?", SILENT_CAPTURE_HELP)
             HelpBlock(
-                "Spotify plays, speakers stay silent?",
-                "Spotify (and some other DRM-protected apps) tell Android not to share their audio with capture apps. " +
-                    "Android then hands AirBridge digital silence, and AirBridge shows a warning after 3 seconds. " +
-                    "No app can get around this without root. For Spotify, use Spotify Connect (built into Sonos, " +
-                    "Denon/Marantz HEOS, Yamaha MusicCast, WiiM and many others), or play the music from an app that allows capture.",
+                "\"AirPlay 1 (fallback)\" on a speaker?",
+                "AirPlay 2 did not connect, so AirBridge plays to that speaker over AirPlay 1. The usual cause is a speaker " +
+                    "that accepts only PTP timing; Android apps can offer only NTP timing. The speaker's entry under Speakers " +
+                    "below shows the AirPlay 2 error. Its ⋮ menu can force either protocol.",
             )
             HelpBlock(
                 "Speaker not listed?",
@@ -252,8 +263,9 @@ fun DiagnosticsSheet(state: MainUiState, logLines: List<String>, onCopyLog: () -
             connected.forEach { row ->
                 val s = row.status!!
                 Text(
-                    "${row.receiver.name}: ${s.state.label()} via ${s.protocol?.label ?: "-"}; packets ${s.packetsSent}, resent ${s.retransmits}, dropped ${s.droppedFrames}" +
+                    "${row.receiver.name}: ${s.state.label()} via ${s.protocolLabel ?: "-"} at ${row.receiver.host}; packets ${s.packetsSent}, resent ${s.retransmits}, dropped ${s.droppedFrames}" +
                         (if (s.syncOffsetMs != 0) "; sync offset ${SyncOffset.label(s.syncOffsetMs)}" else "") +
+                        (if (s.isFallback) "; ${s.fallbackReason ?: "AirPlay 2 failed"}" else "") +
                         (s.message?.let { " - $it" } ?: ""),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -292,10 +304,17 @@ private fun captureText(state: MainUiState): String = when (state.stream.phase) 
     com.airbridge.airplay.StreamPhase.STREAMING -> when (state.health) {
         CaptureHealthMonitor.Status.OK -> "receiving audio"
         CaptureHealthMonitor.Status.NOTHING_PLAYING -> "silent (no app is playing)"
-        CaptureHealthMonitor.Status.BLOCKED -> "silent while music plays: the app blocks capture"
+        CaptureHealthMonitor.Status.BLOCKED -> "silent while music plays: the playing app seems to block capture"
         CaptureHealthMonitor.Status.STARTING -> "starting"
-    }
+    } + captureFormatText(state.captureRateHz)
     else -> "not running"
+}
+
+/** " (44.1 kHz)" or " (48 kHz, converted to 44.1 kHz)"; empty before the format is known. */
+internal fun captureFormatText(sampleRate: Int): String = when (sampleRate) {
+    0 -> ""
+    44_100 -> " (44.1 kHz)"
+    else -> " (${java.text.DecimalFormat("0.#", java.text.DecimalFormatSymbols(java.util.Locale.US)).format(sampleRate / 1000.0)} kHz, converted to 44.1 kHz)"
 }
 
 private fun SessionState.label(): String = name.lowercase().replace('_', ' ')

@@ -7,6 +7,7 @@ import com.airbridge.airplay.airplay.AirPlayVolume
 import com.airbridge.airplay.airplay.AudioCodec
 import com.airbridge.airplay.airplay.AudioFrame
 import com.airbridge.airplay.airplay.AuthenticationFailedAirPlayException
+import com.airbridge.airplay.airplay.LatencyBounds
 import com.airbridge.airplay.airplay.PasswordRequiredException
 import com.airbridge.airplay.airplay.PinRequiredException
 import com.airbridge.airplay.airplay.ProtocolFailureException
@@ -122,6 +123,13 @@ class Ap2Sender(
     @Volatile var pairingMode: String = "none"
         private set
 
+    /**
+     * The latency window sent as `latencyMin`/`latencyMax` in the stream SETUP. It is derived from
+     * the base latency ([SyncOffset.ap2LatencyBounds]: 11,025..99,225 frames by default), so every
+     * sync packet for any offset in -250..+250 ms lies inside it.
+     */
+    val latencyBounds: LatencyBounds = SyncOffset.ap2LatencyBounds(config.settings.syncLatencyFrames)
+
     override fun connect(timeline: StreamTimeline, firstFrameIndex: Long) {
         this.timeline = timeline
         val client = RtspClient(config.host, config.port, identity)
@@ -145,6 +153,8 @@ class Ap2Sender(
             // 3. Session SETUP (timing + event channel).
             val s = RtpStreamer(config.host, timeline.clock, config.name, stats)
             s.syncOffsetMs = syncOffsetMs
+            // The window that the stream SETUP below declares; every sync packet is checked against it.
+            s.latencyBounds = latencyBounds
             streamer = s
             s.startResponders()
             val sessionBody = linkedMapOf<String, Any?>(
@@ -179,7 +189,8 @@ class Ap2Sender(
             val record = client.request("RECORD", uri)
             requireSuccess(record, "RECORD")
 
-            // 5. Stream SETUP: realtime ALAC (or L16) with the audio key.
+            // 5. Stream SETUP: realtime ALAC (or L16) with the audio key. The latency window covers
+            //    every latency the sync packets can announce for a -250..+250 ms offset.
             val alac = config.codec == AudioCodec.ALAC
             val stream = linkedMapOf<String, Any?>(
                 "audioFormat" to if (alac) AP2_FORMAT_ALAC_44100_16_2 else PcmL16.AP2_AUDIO_FORMAT_PCM_44100_16_2,
@@ -187,8 +198,8 @@ class Ap2Sender(
                 "controlPort" to s.localControlPort.toLong(),
                 "ct" to if (alac) 2L else 1L,
                 "isMedia" to true,
-                "latencyMax" to config.settings.ap2LatencyMax.toLong(),
-                "latencyMin" to config.settings.ap2LatencyMin.toLong(),
+                "latencyMax" to latencyBounds.max.toLong(),
+                "latencyMin" to latencyBounds.min.toLong(),
                 "shk" to audioKey!!,
                 "spf" to AlacEncoder.FRAMES_PER_PACKET.toLong(),
                 "sr" to AlacEncoder.SAMPLE_RATE.toLong(),

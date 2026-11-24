@@ -6,14 +6,18 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.os.Build
 import com.airbridge.airplay.util.AirLog
+import com.airbridge.airplay.util.HeldLock
+import com.airbridge.airplay.util.LockSet
 import java.net.Inet4Address
 import java.util.ArrayDeque
 
 /**
  * Discovery through Android's NsdManager for `_raop._tcp.` and `_airplay._tcp.`, plus the raw
  * multicast fallback ([RawMdnsBrowser]) because NsdManager loses TXT records on some OEM builds.
- * Holds a Wi-Fi MulticastLock while running. Resolves are serialized: before Android 14 NsdManager
- * rejects concurrent resolves with FAILURE_ALREADY_ACTIVE.
+ * Holds a Wi-Fi MulticastLock while running: [start] takes it through a [LockSet] and [stop]
+ * releases it in a `finally`, so it never stays held after discovery stops, even if stopping NSD
+ * or the raw browser throws. Resolves are serialized: before Android 14 NsdManager rejects
+ * concurrent resolves with FAILURE_ALREADY_ACTIVE.
  */
 class DiscoveryManager(
     context: Context,
@@ -22,7 +26,7 @@ class DiscoveryManager(
     private val appContext = context.applicationContext
     private val nsd = appContext.getSystemService(Context.NSD_SERVICE) as NsdManager
     private val wifi = appContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-    private var multicastLock: WifiManager.MulticastLock? = null
+    private var multicastLock: LockSet? = null
     private val listeners = HashMap<ServiceType, NsdManager.DiscoveryListener>()
     private val resolveQueue = ArrayDeque<Pair<ServiceType, NsdServiceInfo>>()
     private var resolving = false
@@ -34,9 +38,23 @@ class DiscoveryManager(
     fun start() {
         if (running) return
         running = true
-        multicastLock = wifi.createMulticastLock("AirBridge-mDNS").apply {
-            setReferenceCounted(false)
-            acquire()
+        try {
+            val lock = wifi.createMulticastLock("AirBridge-mDNS").apply { setReferenceCounted(false) }
+            multicastLock = LockSet(
+                listOf(
+                    object : HeldLock {
+                        override val name = "multicast lock"
+                        override val isHeld: Boolean get() = lock.isHeld
+                        override fun acquire() = lock.acquire()
+                        override fun release() = lock.release()
+                    },
+                ),
+            ).also { it.acquireAll() }
+        } catch (e: Exception) {
+            // NsdManager runs in a system service and the raw browser's answers come by unicast,
+            // so discovery can still work without the lock on most phones.
+            AirLog.w(TAG, "multicast lock unavailable; discovery continues without it", e)
+            multicastLock = null
         }
         for (type in ServiceType.values()) {
             val listener = object : NsdManager.DiscoveryListener {
@@ -76,19 +94,26 @@ class DiscoveryManager(
     fun stop() {
         if (!running) return
         running = false
-        for (l in listeners.values) {
-            try {
-                nsd.stopServiceDiscovery(l)
-            } catch (_: Exception) {
+        try {
+            for (l in listeners.values) {
+                try {
+                    nsd.stopServiceDiscovery(l)
+                } catch (_: Exception) {
+                }
             }
+            listeners.clear()
+            try {
+                rawBrowser?.close()
+            } finally {
+                rawBrowser = null
+                expiryThread?.interrupt()
+                expiryThread = null
+            }
+        } finally {
+            multicastLock?.releaseAll()
+            multicastLock = null
+            synchronized(resolveQueue) { resolveQueue.clear(); resolving = false }
         }
-        listeners.clear()
-        rawBrowser?.close()
-        rawBrowser = null
-        expiryThread?.interrupt()
-        multicastLock?.let { if (it.isHeld) it.release() }
-        multicastLock = null
-        synchronized(resolveQueue) { resolveQueue.clear(); resolving = false }
     }
 
     /** Clears results and browses again (pull-to-refresh). */

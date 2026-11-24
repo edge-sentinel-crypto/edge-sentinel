@@ -70,15 +70,14 @@ class StreamTimeline(
 data class StreamSettings(
     val codec: AudioCodec = AudioCodec.ALAC,
     /** Latency announced in sync packets (frames); with the 0x07 flag receivers add 11025, total 2.0 s. */
-    val syncLatencyFrames: Int = 77_175,
+    val syncLatencyFrames: Int = SyncOffset.BASE_LATENCY_FRAMES,
     /**
      * Initial per-speaker sync offset in ms (-250..+250; negative = earlier, positive = later).
-     * It shifts the announced latency by round(ms x 44.1) frames; see [SyncOffset].
+     * It shifts the announced latency by round(ms x 44.1) frames; see [SyncOffset]. The AirPlay 2
+     * stream SETUP window is derived from [syncLatencyFrames] ([SyncOffset.ap2LatencyBounds]), so
+     * it always covers the whole offset range.
      */
     val syncOffsetMs: Int = SyncOffset.DEFAULT_MS,
-    /** AirPlay 2 SETUP latency bounds (frames). */
-    val ap2LatencyMin: Int = 11_025,
-    val ap2LatencyMax: Int = 88_200,
     val initialVolumeDb: Double = -15.0,
 )
 
@@ -88,6 +87,8 @@ class SenderStats {
     @Volatile var retransmitted = 0L
     @Volatile var timingRepliesSent = 0L
     @Volatile var syncPacketsSent = 0L
+    /** Sync packets whose latency had to be pulled into the AirPlay 2 SETUP window (stays 0; see [LatencyBounds]). */
+    @Volatile var latencyClamps = 0L
     @Volatile var feedbackSent = 0L
     @Volatile var controlFailures = 0
 }

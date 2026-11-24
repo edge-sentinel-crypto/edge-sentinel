@@ -35,6 +35,12 @@ data class ReceiverUi(
     /** Protocol in use when connected, otherwise what Auto/override would use. */
     val protocol: AirPlayProtocol get() = status?.protocol ?: receiver.protocolFor(preference)
     val state: SessionState? get() = status?.state
+
+    /** True when Auto mode could not use AirPlay 2 for this speaker and it plays over AirPlay 1. */
+    val isFallback: Boolean get() = status?.isFallback == true
+
+    /** Badge text: "AirPlay 2", "AirPlay 1", or "AirPlay 1 (fallback)" after an automatic fallback. */
+    val protocolLabel: String get() = status?.protocolLabel ?: protocol.label
 }
 
 /** One saved group as shown in the multi-room bar. */
@@ -55,6 +61,8 @@ data class MainUiState(
     val health: CaptureHealthMonitor.Status = CaptureHealthMonitor.Status.STARTING,
     val receivers: List<ReceiverUi> = emptyList(),
     val groups: List<SpeakerGroup> = emptyList(),
+    /** Capture sample rate while streaming: 44,100, or 48,000 (converted to 44,100); 0 when idle. */
+    val captureRateHz: Int = 0,
 ) {
     val activeCount: Int get() = receivers.count { it.state == SessionState.STREAMING }
     val enabledCount: Int get() = receivers.count { it.enabled }
@@ -112,6 +120,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         receiverRows,
         controller.groups,
     ) { stream, level, health, rows, groups -> MainUiState(stream, level, health, rows, groups) }
+        .combine(controller.captureRate) { state, rate -> state.copy(captureRateHz = rate) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MainUiState())
 
     fun setEnabled(r: AirPlayReceiver, on: Boolean) = controller.setReceiverEnabled(r, on)

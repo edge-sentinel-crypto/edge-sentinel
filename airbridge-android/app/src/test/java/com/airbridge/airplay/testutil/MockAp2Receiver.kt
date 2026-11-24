@@ -45,10 +45,22 @@ class MockAp2Receiver(
     private val reject470ForTransient: Boolean = false,
     /** Refuse the NTP session SETUP (what a PTP-only AirPlay 2 receiver such as Shairport-Sync does). */
     private val rejectNtpSetup: Boolean = false,
+    /**
+     * Strict latency checking: the stream SETUP must declare integer `latencyMin` <= `latencyMax`
+     * (else 400), and every sync packet must stay inside that window, both as announced and as the
+     * total with the receiver's 11,025 frames; any packet outside it is recorded in [errors].
+     */
+    private val strictLatencyWindow: Boolean = false,
 ) : Closeable {
     private val loopback = InetAddress.getLoopbackAddress()
-    private val server = ServerSocket(0, 8, loopback)
+    @Volatile private var server = ServerSocket(0, 8, loopback)
     val port: Int get() = server.localPort
+
+    /** Latency window from the last stream SETUP (frames). */
+    @Volatile var latencyWindow: LongRange? = null
+
+    /** Every sync packet checked in strict mode, in arrival order. */
+    val syncChecks: MutableList<SyncLatency> = CopyOnWriteArrayList()
 
     val accessoryId = "4A:42:52:49:44:47"
     private val accessoryKey = Ed25519KeyPair.generate()
@@ -75,20 +87,37 @@ class MockAp2Receiver(
     private var eventServer: ServerSocket? = null
 
     fun start(): MockAp2Receiver {
-        Thread({ acceptLoop() }, "mock-ap2-accept").apply { isDaemon = true; start() }
+        val listening = server
+        Thread({ acceptLoop(listening) }, "mock-ap2-accept").apply { isDaemon = true; start() }
         return this
     }
 
-    private fun acceptLoop() {
+    private fun acceptLoop(listening: ServerSocket) {
         while (running) {
             val s = try {
-                server.accept()
+                listening.accept()
             } catch (_: Exception) {
                 break
             }
             sockets += s
             Thread({ Connection(s).run() }, "mock-ap2-conn").apply { isDaemon = true; start() }
         }
+    }
+
+    /**
+     * The same receiver (same keys and pairings) moves to a new address: the old listening port
+     * and every open connection close, and it listens on a new port. Returns the new port.
+     */
+    fun moveToNewPort(): Int {
+        val old = server
+        val fresh = ServerSocket(0, 8, loopback)
+        server = fresh
+        old.close()
+        sockets.forEach { runCatching { it.close() } }
+        sockets.clear()
+        eventServer?.close()
+        Thread({ acceptLoop(fresh) }, "mock-ap2-accept").apply { isDaemon = true; start() }
+        return fresh.localPort
     }
 
     /** Per-connection pairing state. */
@@ -124,7 +153,7 @@ class MockAp2Receiver(
                     if (req.method == "TEARDOWN") break
                 }
             } catch (e: Exception) {
-                if (running) errors += "connection error: ${e.javaClass.simpleName}: ${e.message}"
+                if (running && !socket.isClosed) errors += "connection error: ${e.javaClass.simpleName}: ${e.message}"
             } finally {
                 socket.close()
             }
@@ -280,6 +309,15 @@ class MockAp2Receiver(
             }
             val stream = streams.first() as Map<*, *>
             streamSetup = stream.mapKeys { it.key.toString() }
+            val latencyMin = stream["latencyMin"] as? Long
+            val latencyMax = stream["latencyMax"] as? Long
+            latencyWindow = if (latencyMin != null && latencyMax != null) latencyMin..latencyMax else null
+            if (strictLatencyWindow) {
+                if (latencyMin == null || latencyMax == null || latencyMin < 0 || latencyMin > latencyMax) {
+                    errors += "stream SETUP latency window is not valid: latencyMin=$latencyMin latencyMax=$latencyMax"
+                    return status(req, 400)
+                }
+            }
             val shk = stream["shk"] as ByteArray
             if (shk.size != 32) errors += "shk is ${shk.size} bytes"
             if (stream["type"] != 96L) errors += "stream type ${stream["type"]}"
@@ -289,6 +327,15 @@ class MockAp2Receiver(
             s.clientControlPort = (stream["controlPort"] as Long).toInt()
             s.decoder = if (ct == 2L) { b -> AlacDecoder.decode(b) } else { b -> PcmL16.decode(b) }
             payloadKey = shk
+            if (strictLatencyWindow) {
+                val min = latencyMin!!
+                val max = latencyMax!!
+                s.onSyncPacket = { packet ->
+                    val check = SyncLatency.of(packet, min, max)
+                    syncChecks += check
+                    if (!check.inside) errors += "outside the SETUP latency window: $check"
+                }
+            }
             s.start()
             return ok(
                 req,
@@ -329,7 +376,7 @@ class MockAp2Receiver(
                 eventAcknowledged = resp?.statusCode == 200
             }
         } catch (e: Exception) {
-            if (running) errors += "event channel: ${e.message}"
+            if (running && !events.isClosed) errors += "event channel: ${e.message}"
         }
     }
 

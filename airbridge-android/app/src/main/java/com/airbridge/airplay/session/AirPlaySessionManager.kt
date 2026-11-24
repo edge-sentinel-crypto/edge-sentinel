@@ -63,11 +63,19 @@ class AirPlaySessionManager(
     fun connect(receiver: AirPlayReceiver, options: ConnectOptions) {
         val t = timeline ?: throw IllegalStateException("stream not started")
         sessions.remove(receiver.id)?.stop()
-        val session = ReceiverSession(receiver, options, factory, t, { frameCounter.get() }, ::onStatus)
+        lateinit var session: ReceiverSession
+        session = ReceiverSession(receiver, options, factory, t, { frameCounter.get() }, { status -> onStatus(session, status) })
         sessions[receiver.id] = session
-        onStatus(session.status())
+        onStatus(session, session.status())
         session.start()
     }
+
+    /**
+     * Hands a re-announced speaker (same id; maybe a new address or port) to its session, without
+     * a reconnect while it plays. See [ReceiverSession.updateReceiver]. Returns true when the
+     * speaker's address or a port changed; false when it is not connected or nothing moved.
+     */
+    fun updateReceiver(receiver: AirPlayReceiver): Boolean = sessions[receiver.id]?.updateReceiver(receiver) ?: false
 
     fun disconnect(receiverId: String) {
         val s = sessions.remove(receiverId) ?: return
@@ -120,10 +128,11 @@ class AirPlaySessionManager(
         return frame
     }
 
-    private fun onStatus(status: ReceiverStatus) {
+    private fun onStatus(from: ReceiverSession, status: ReceiverStatus) {
         synchronized(_statuses) {
-            // Ignore late updates from sessions that were already removed.
-            if (sessions.containsKey(status.receiverId)) {
+            // Ignore late updates from sessions that were removed or replaced (for example the old
+            // session's final "stopped" after a protocol change reconnected the speaker).
+            if (sessions[status.receiverId] === from) {
                 _statuses.value = _statuses.value + (status.receiverId to status)
             }
         }

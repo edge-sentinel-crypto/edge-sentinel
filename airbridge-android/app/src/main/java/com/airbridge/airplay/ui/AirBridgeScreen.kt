@@ -328,7 +328,7 @@ private fun heroSubtitle(state: MainUiState): String = when (state.stream.phase)
     StreamPhase.STARTING -> "Accept Android's capture prompt"
     StreamPhase.STOPPING -> "Disconnecting speakers"
     StreamPhase.STREAMING -> when (state.health) {
-        CaptureHealthMonitor.Status.BLOCKED -> "The playing app is blocking capture"
+        CaptureHealthMonitor.Status.BLOCKED -> "The playing app seems to block capture"
         CaptureHealthMonitor.Status.NOTHING_PLAYING -> "Waiting for audio from another app"
         else -> if (state.enabledCount == 0) "Turn on a speaker below" else "About 2 seconds behind your phone"
     }
@@ -337,7 +337,7 @@ private fun heroSubtitle(state: MainUiState): String = when (state.stream.phase)
 private fun meterCaption(state: MainUiState): String = when (state.health) {
     CaptureHealthMonitor.Status.OK -> "Live audio"
     CaptureHealthMonitor.Status.NOTHING_PLAYING -> "Silence: nothing is playing"
-    CaptureHealthMonitor.Status.BLOCKED -> "Silence: capture blocked by the app"
+    CaptureHealthMonitor.Status.BLOCKED -> "Silence: the app seems to block capture"
     CaptureHealthMonitor.Status.STARTING -> "Listening…"
 }
 
@@ -383,6 +383,16 @@ fun AudioMeter(level: LevelMeter.Level, live: Boolean) {
     }
 }
 
+/**
+ * Banner text for [CaptureHealthMonitor.Status.BLOCKED]: music is active but the captured audio has
+ * been digital silence for about 3 seconds. Android's playback capture works with most media apps;
+ * this happens only when the playing app (or a version of it) opts out of capture.
+ */
+internal const val CAPTURE_BLOCKED_TEXT =
+    "The app that is playing (or this version of it) seems to block Android's playback capture, so " +
+        "AirBridge receives silence. Check that app's settings, try another player, or use Spotify " +
+        "Connect or Cast where your speaker supports it."
+
 @Composable
 private fun CaptureBlockedBanner(onHelp: () -> Unit) {
     Card(
@@ -396,8 +406,7 @@ private fun CaptureBlockedBanner(onHelp: () -> Unit) {
                 Text("Music is playing, but AirBridge hears silence", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onErrorContainer)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "The app you are playing from blocks Android's audio capture. Spotify does this. " +
-                        "Use Spotify Connect on speakers that support it, or play from an app that allows capture.",
+                    CAPTURE_BLOCKED_TEXT,
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
@@ -494,13 +503,14 @@ fun ReceiverCard(row: ReceiverUi, phase: StreamPhase, actions: ScreenActions) {
                     }
                     Spacer(Modifier.height(3.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        ProtocolBadge(row.protocol)
+                        ProtocolBadge(row)
                         Spacer(Modifier.width(6.dp))
                         Text(
                             r.modelLabel + " · " + r.host,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
+                            // Two lines, so the address stays readable next to the wider fallback badge.
+                            maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
                     }
@@ -522,16 +532,33 @@ fun ReceiverCard(row: ReceiverUi, phase: StreamPhase, actions: ScreenActions) {
     }
 }
 
+/**
+ * "AirPlay 2" (blue) or "AirPlay 1" (grey) badge. After an automatic fallback (Auto mode, AirPlay 2
+ * failed, for example because the speaker rejects NTP timing) it reads "AirPlay 1 (fallback)" in
+ * amber, so it is clear why an AirPlay 2 speaker plays over AirPlay 1.
+ */
 @Composable
-private fun ProtocolBadge(protocol: AirPlayProtocol) {
-    val ap2 = protocol == AirPlayProtocol.AIRPLAY_2
-    val color = if (ap2) AirBridgeColors.Blue else AirBridgeColors.Slate400
+private fun ProtocolBadge(row: ReceiverUi) {
+    val fallback = row.isFallback
+    val ap2 = row.protocol == AirPlayProtocol.AIRPLAY_2
+    val color = when {
+        fallback -> AirBridgeColors.Amber
+        ap2 -> AirBridgeColors.Blue
+        else -> AirBridgeColors.Slate400
+    }
+    val textColor = when {
+        fallback -> Color(0xFFFFD9A0)
+        ap2 -> Color(0xFFB9D0FF)
+        else -> AirBridgeColors.Slate300
+    }
+    val description = if (fallback) "${row.protocolLabel}: AirPlay 2 did not connect, so AirPlay 1 is used" else row.protocolLabel
     Box(
         Modifier.clip(RoundedCornerShape(6.dp))
             .background(color.copy(alpha = 0.16f))
+            .semantics { contentDescription = description }
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        Text(protocol.label, style = MaterialTheme.typography.labelSmall, color = if (ap2) Color(0xFFB9D0FF) else AirBridgeColors.Slate300)
+        Text(row.protocolLabel, style = MaterialTheme.typography.labelSmall, color = textColor, maxLines = 1)
     }
 }
 
@@ -543,7 +570,7 @@ private fun StatusLine(row: ReceiverUi, phase: StreamPhase, actions: ScreenActio
         status == null -> AirBridgeColors.Slate400 to "Waiting for speaker on the network"
         else -> when (status.state) {
             SessionState.CONNECTING -> AirBridgeColors.Amber to (status.message ?: "Connecting…")
-            SessionState.STREAMING -> AirBridgeColors.Teal to "Playing · ${status.protocol?.label ?: ""}"
+            SessionState.STREAMING -> AirBridgeColors.Teal to "Playing · ${status.protocolLabel ?: ""}"
             SessionState.NEEDS_PIN -> AirBridgeColors.Amber to (status.message ?: "Enter the code shown on the TV")
             SessionState.NEEDS_PASSWORD -> AirBridgeColors.Amber to (status.message ?: "Password required")
             SessionState.RETRYING -> AirBridgeColors.Amber to (status.message ?: "Reconnecting…")

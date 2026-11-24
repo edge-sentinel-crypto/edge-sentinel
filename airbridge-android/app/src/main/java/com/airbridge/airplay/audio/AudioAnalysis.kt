@@ -45,9 +45,11 @@ class LevelMeter(private val decayPerChunkDb: Float = 0.6f) {
 
 /**
  * Detects capture that is silently blocked. Android's AudioPlaybackCapture returns digital zeros
- * for apps that opt out of capture (Spotify and other DRM-protected players do), while
+ * for an app that opts out of capture (an app, or one version of it, can set
+ * `android:allowAudioPlaybackCapture="false"` or a capture policy), while
  * AudioManager.isMusicActive() still reports playback. If that persists for [blockedAfterMs]
- * the user is told, instead of streaming silence without explanation.
+ * the user is told, instead of streaming silence without explanation. Apps that allow capture,
+ * which is Android's default for current apps, are captured normally.
  */
 class CaptureHealthMonitor(
     private val blockedAfterMs: Long = 3_000,

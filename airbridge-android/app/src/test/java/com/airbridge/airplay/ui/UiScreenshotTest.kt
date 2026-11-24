@@ -8,6 +8,7 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.Composable
 import com.airbridge.airplay.StreamPhase
 import com.airbridge.airplay.StreamUiState
+import com.airbridge.airplay.airplay.AirPlayProtocol
 import com.airbridge.airplay.audio.CaptureHealthMonitor
 import com.airbridge.airplay.audio.LevelMeter
 import com.airbridge.airplay.mdns.AirPlayReceiver
@@ -85,11 +86,35 @@ class UiScreenshotTest {
         SpeakerGroup("g3", "Everywhere", linkedSetOf(avr.id, appleTv.id, homePod.id, sonos.id)),
     )
 
-    private fun row(r: AirPlayReceiver, enabled: Boolean, state: SessionState? = null, volume: Int = 50, message: String? = null, offset: Int = 0) =
+    /** A generic AirPlay 2 speaker that also offers AirPlay 1 (for the fallback screenshot). */
+    private val bedroom = AirPlayReceiver(
+        "02AB34CD56EF", "Bedroom", "192.0.2.60", raopPort = 7000, airplayPort = 7000,
+        airplayTxt = mapOf("features" to "0x401C4A00,0x1C340", "model" to "AirPlay speaker"),
+        raopTxt = mapOf("cn" to "0,1", "et" to "0,4"),
+    )
+
+    private fun row(
+        r: AirPlayReceiver,
+        enabled: Boolean,
+        state: SessionState? = null,
+        volume: Int = 50,
+        message: String? = null,
+        offset: Int = 0,
+        fallback: Boolean = false,
+    ) =
         ReceiverUi(
             receiver = r,
             enabled = enabled,
-            status = state?.let { ReceiverStatus(r.id, r.name, it, r.recommendedProtocol, volume, message, packetsSent = 4210, syncOffsetMs = offset) },
+            status = state?.let {
+                if (fallback) {
+                    ReceiverStatus(
+                        r.id, r.name, it, AirPlayProtocol.AIRPLAY_1, volume, message, packetsSent = 4210, syncOffsetMs = offset,
+                        fallbackFrom = AirPlayProtocol.AIRPLAY_2, fallbackReason = "AirPlay 2 failed: SETUP (session) failed with 500",
+                    )
+                } else {
+                    ReceiverStatus(r.id, r.name, it, r.recommendedProtocol, volume, message, packetsSent = 4210, syncOffsetMs = offset)
+                }
+            },
             volume = volume,
             preference = ProtocolPreference.AUTO,
             syncOffsetMs = offset,
@@ -176,8 +201,9 @@ class UiScreenshotTest {
         ),
     )
 
+    /** Music is active but the captured audio is silent: the playing app seems to opt out of capture. */
     @Test
-    fun spotifyBlockedWarning() = render(
+    fun captureBlockedWarning() = render(
         "03-capture-blocked",
         MainUiState(
             stream = StreamUiState(StreamPhase.STREAMING),
@@ -223,5 +249,23 @@ class UiScreenshotTest {
             groups = groups,
         ),
         dialog = { SyncOffsetDialog(receiverName = "Den Receiver", initialMs = 40, onChange = {}, onDismiss = {}) },
+    )
+
+    /** Auto mode fell back to AirPlay 1 for the Bedroom speaker (it rejected AirPlay 2's NTP timing). */
+    @Test
+    fun airPlay1Fallback() = render(
+        "06-airplay1-fallback",
+        MainUiState(
+            stream = StreamUiState(StreamPhase.STREAMING),
+            level = loud,
+            health = CaptureHealthMonitor.Status.OK,
+            receivers = listOf(
+                row(bedroom, true, SessionState.STREAMING, volume = 60, fallback = true),
+                row(avr, true, SessionState.STREAMING, volume = 55, offset = 40),
+                row(homePod, true, SessionState.STREAMING, volume = 65),
+                row(sonos, false),
+            ),
+            groups = groups,
+        ),
     )
 }

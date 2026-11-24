@@ -21,6 +21,8 @@ import com.airbridge.airplay.AirBridgeApp
 import com.airbridge.airplay.MainActivity
 import com.airbridge.airplay.R
 import com.airbridge.airplay.util.AirLog
+import com.airbridge.airplay.util.HeldLock
+import com.airbridge.airplay.util.LockSet
 
 /**
  * Foreground service (types mediaProjection | mediaPlayback) that owns the MediaProjection,
@@ -30,13 +32,22 @@ import com.airbridge.airplay.util.AirLog
  *
  * Android 14+ requires startForeground() with the mediaProjection type *before*
  * getMediaProjection(), and a consent token can be used only once; both are honoured here.
+ *
+ * Lifecycle: every start creates fresh state. However streaming ends (Stop in the app or the
+ * notification, Android ending the projection through [MediaProjection.Callback.onStop] when the
+ * screen locks or capture is revoked, a capture error, or the service being destroyed),
+ * [stopStreaming] runs once and, in `finally` blocks, releases the AudioRecord, unregisters the
+ * projection callback, stops the projection and releases both locks ([LockSet]), so nothing leaks.
+ * A late onStop from an earlier projection is ignored.
  */
 class AudioCaptureService : Service() {
     private var projection: MediaProjection? = null
+    private var projectionCallback: MediaProjection.Callback? = null
     private var engine: CaptureEngine? = null
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
+    private var locks: LockSet? = null
     private val main = Handler(Looper.getMainLooper())
+
+    /** True between the start of [stopStreaming] and the next [startStreaming]. */
     private var stopping = false
 
     private val controller get() = (application as AirBridgeApp).controller
@@ -70,6 +81,8 @@ class AudioCaptureService : Service() {
 
     private fun startStreaming(intent: Intent) {
         if (engine != null) return
+        stopping = false
+        lastActiveCount = -1
         createChannel()
         // 1. Become a foreground service first (required before getMediaProjection on Android 14+).
         val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
@@ -78,7 +91,7 @@ class AudioCaptureService : Service() {
         } catch (e: Exception) {
             AirLog.e(TAG, "startForeground failed", e)
             controller.onCaptureFailed("Android refused to start the streaming service: ${e.message}")
-            stopSelf()
+            stopStreaming(null, notifyController = false)
             return
         }
 
@@ -94,23 +107,121 @@ class AudioCaptureService : Service() {
         }
         if (mp == null) {
             controller.onCaptureFailed("Screen/audio capture permission was not granted")
-            stopStreaming(null)
+            stopStreaming(null, notifyController = false)
             return
         }
         projection = mp
-        mp.registerCallback(object : MediaProjection.Callback() {
+        val callback = object : MediaProjection.Callback() {
             override fun onStop() {
                 AirLog.i(TAG, "MediaProjection stopped by the system")
-                main.post { stopStreaming("Android ended audio capture (screen locked or capture revoked)") }
+                main.post {
+                    // Ignore a late callback from a projection that an earlier stop already ended.
+                    if (projection === mp) stopStreaming("Android ended audio capture (screen locked or capture revoked)")
+                }
             }
-        }, main)
-
-        // 3. Keep CPU and Wi-Fi awake while streaming with the screen off.
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AirBridge:streaming").apply {
-            setReferenceCounted(false)
-            acquire(12 * 60 * 60 * 1000L)
         }
+        projectionCallback = callback
+        mp.registerCallback(callback, main)
+
+        // 3. Keep CPU and Wi-Fi awake while streaming with the screen off. LockSet releases every
+        //    lock it took if a later one fails, and stopStreaming releases all of them.
+        try {
+            val set = LockSet(listOf(wakeLock(), wifiLock()))
+            locks = set
+            set.acquireAll()
+        } catch (e: Exception) {
+            // Streaming still works while the screen is on; say why it may stop with the screen off.
+            AirLog.w(TAG, "could not keep the CPU and Wi-Fi awake; streaming may stop when the screen turns off", e)
+        }
+
+        // 4. Start capture and the AirPlay sessions.
+        val c = controller
+        val e = CaptureEngine(this, mp, c.sessions, c.clock, object : CaptureEngine.Listener {
+            override fun onLevel(level: LevelMeter.Level) = c.onLevel(level)
+            override fun onHealth(status: CaptureHealthMonitor.Status) = c.onCaptureHealth(status)
+            override fun onCaptureFormat(sampleRate: Int) = c.onCaptureFormat(sampleRate)
+            override fun onCaptureError(message: String) {
+                main.post { stopStreaming(message) }
+            }
+        })
+        try {
+            c.onCaptureStarting()
+            // Set before start(): if start() fails part-way, stopStreaming() still calls stop(),
+            // which releases whatever AudioRecord was opened.
+            engine = e
+            e.start()
+            c.onCaptureStarted()
+            notifyManager().notify(NOTIFICATION_ID, buildNotification())
+            main.postDelayed(notificationRefresher, 2_000)
+        } catch (ex: Exception) {
+            AirLog.e(TAG, "capture start failed", ex)
+            controller.onCaptureFailed("Could not start audio capture: ${ex.message}")
+            stopStreaming(null, notifyController = false)
+        }
+    }
+
+    /**
+     * Ends streaming once: stops capture, tells the controller (TEARDOWN off the main thread), ends
+     * the projection and releases the locks. Each step runs even if an earlier one throws.
+     */
+    private fun stopStreaming(reason: String?, notifyController: Boolean = true) {
+        if (stopping) return
+        stopping = true
+        main.removeCallbacks(notificationRefresher)
+        try {
+            try {
+                engine?.stop()
+            } catch (e: Exception) {
+                AirLog.w(TAG, "capture stop failed", e)
+            } finally {
+                engine = null
+            }
+            if (notifyController) {
+                // TEARDOWN can block on the network: do it off the main thread.
+                Thread({ controller.onCaptureStopped(reason) }, "airbridge-teardown").start()
+            }
+        } finally {
+            val p = projection
+            val cb = projectionCallback
+            projection = null
+            projectionCallback = null
+            if (p != null) {
+                try {
+                    if (cb != null) p.unregisterCallback(cb)
+                } catch (_: Exception) {
+                }
+                try {
+                    p.stop()
+                } catch (_: Exception) {
+                }
+            }
+            locks?.releaseAll()
+            locks = null
+            try {
+                stopForeground(STOP_FOREGROUND_REMOVE)
+            } catch (_: Exception) {
+            }
+            stopSelf()
+        }
+    }
+
+    override fun onDestroy() {
+        if (!stopping) stopStreaming(null)
+        super.onDestroy()
+    }
+
+    private fun wakeLock(): HeldLock {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AirBridge:streaming").apply { setReferenceCounted(false) }
+        return object : HeldLock {
+            override val name = "wake lock"
+            override val isHeld: Boolean get() = lock.isHeld
+            override fun acquire() = lock.acquire(WAKE_LOCK_TIMEOUT_MS)
+            override fun release() = lock.release()
+        }
+    }
+
+    private fun wifiLock(): HeldLock {
         val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         // HIGH_PERF keeps Wi-Fi out of power save with the screen off on Android 10-13; it is a no-op
         // from Android 14, where LOW_LATENCY (effective while AirBridge is visible) is the remaining option.
@@ -120,59 +231,13 @@ class AudioCaptureService : Service() {
             @Suppress("DEPRECATION")
             WifiManager.WIFI_MODE_FULL_HIGH_PERF
         }
-        wifiLock = wm.createWifiLock(mode, "AirBridge:wifi").apply {
-            setReferenceCounted(false)
-            acquire()
+        val lock = wm.createWifiLock(mode, "AirBridge:wifi").apply { setReferenceCounted(false) }
+        return object : HeldLock {
+            override val name = "Wi-Fi lock"
+            override val isHeld: Boolean get() = lock.isHeld
+            override fun acquire() = lock.acquire()
+            override fun release() = lock.release()
         }
-
-        // 4. Start capture and the AirPlay sessions.
-        val c = controller
-        val timelineClock = c.clock
-        val e = CaptureEngine(this, mp, c.sessions, timelineClock, object : CaptureEngine.Listener {
-            override fun onLevel(level: LevelMeter.Level) = c.onLevel(level)
-            override fun onHealth(status: CaptureHealthMonitor.Status) = c.onCaptureHealth(status)
-            override fun onCaptureError(message: String) {
-                main.post { stopStreaming(message) }
-            }
-        })
-        try {
-            c.onCaptureStarting()
-            e.start()
-            engine = e
-            c.onCaptureStarted()
-            notifyManager().notify(NOTIFICATION_ID, buildNotification())
-            main.postDelayed(notificationRefresher, 2_000)
-        } catch (ex: Exception) {
-            AirLog.e(TAG, "capture start failed", ex)
-            controller.onCaptureFailed("Could not start audio capture: ${ex.message}")
-            stopStreaming(null)
-        }
-    }
-
-    private fun stopStreaming(reason: String?) {
-        if (stopping) return
-        stopping = true
-        main.removeCallbacks(notificationRefresher)
-        engine?.stop()
-        engine = null
-        // TEARDOWN can block on the network: do it off the main thread.
-        Thread({ controller.onCaptureStopped(reason) }, "airbridge-teardown").start()
-        try {
-            projection?.stop()
-        } catch (_: Exception) {
-        }
-        projection = null
-        wakeLock?.let { if (it.isHeld) it.release() }
-        wakeLock = null
-        wifiLock?.let { if (it.isHeld) it.release() }
-        wifiLock = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
-
-    override fun onDestroy() {
-        if (!stopping) stopStreaming(null)
-        super.onDestroy()
     }
 
     private fun notifyManager() = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -223,6 +288,9 @@ class AudioCaptureService : Service() {
         const val EXTRA_RESULT_DATA = "result_data"
         private const val CHANNEL_ID = "airbridge_streaming"
         private const val NOTIFICATION_ID = 1001
+
+        /** Safety timeout of the wake lock (it is released when streaming stops). */
+        private const val WAKE_LOCK_TIMEOUT_MS = 12 * 60 * 60 * 1000L
 
         fun startIntent(context: Context, resultCode: Int, data: Intent): Intent =
             Intent(context, AudioCaptureService::class.java)

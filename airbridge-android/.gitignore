@@ -1,27 +1,50 @@
-# Gradle and Android build output and caches
+# Gradle
 .gradle/
 build/
-.kotlin/
-.cxx/
-.externalNativeBuild/
-captures/
+# The Gradle wrapper jar must stay in the repository.
+!gradle/wrapper/gradle-wrapper.jar
 
-# Local machine settings (local.properties holds the SDK path of one machine)
+# Local configuration (Android SDK path) and signing material
 local.properties
-.idea/
-*.iml
-.DS_Store
-Thumbs.db
+*.jks
+*.keystore
+*.p12
+*.pem
+keystore.properties
+signing.properties
 
-# Built packages: the APK is published as a GitHub release asset, never committed
+# Android build outputs (APKs are published as GitHub Release assets, not committed)
 *.apk
 *.aab
 *.ap_
 *.apks
 *.dex
+*.class
+output-metadata.json
 
-# Signing keys and keystores
-*.jks
-*.keystore
-*.p12
-keystore.properties
+# Kotlin
+.kotlin/
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+captures/
+.navigation/
+.externalNativeBuild/
+.cxx/
+
+# Logs, heap dumps, crash dumps and temporary files
+*.log
+*.hprof
+hs_err_pid*
+replay_pid*
+*.tmp
+*.swp
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini

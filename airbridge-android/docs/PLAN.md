@@ -9,30 +9,35 @@ Version 0.2.0 adds multi-room controls: a master volume that keeps the balance b
 per-speaker sync offset of up to 250 ms earlier or later, and saved speaker groups with an
 All on / All off toggle (section 8).
 
-## 1. The most important limitation: Spotify
+Version 0.3.0 fixes the AirPlay 2 latency window so that it covers the whole sync-offset range
+(sections 7.5 and 8), adds a 48 kHz capture fallback with an exact 48 kHz to 44.1 kHz converter
+(section 4), hardens the capture service lifecycle and lock handling (section 4), keeps one speaker
+card with its settings when a speaker changes address (section 5), labels an automatic switch from
+AirPlay 2 to AirPlay 1 as "AirPlay 1 (fallback)" (sections 5 and 9), and corrects the wording about
+which apps can be captured (section 1).
 
-Read this first if you plan to use AirBridge with Spotify.
+## 1. Which apps can be captured (Spotify included)
 
-Android lets an app capture other apps' audio only through the AudioPlaybackCapture API, and every
-app can refuse to be captured. Spotify refuses. Current Spotify builds play through native AAudio
-code that sets "do not capture", so Android hands every capture app, AirBridge included, digital
-silence while Spotify plays. This is documented by RootlessJamesDSP ("Apps such as Spotify block
-internal audio capture") and by a 2026 attempt to patch Spotify that still captured silence. No app
-can get around this on an unrooted phone.
+AirBridge uses Android's standard AudioPlaybackCapture API (Android 10 and newer). It needs no root
+and uses no workarounds. Android shares an app's audio with capture apps unless that app opts out.
 
-What AirBridge does about it:
-
-- It detects the situation. If Android reports that music is playing (`AudioManager.isMusicActive`)
-  but the captured audio has been exact zeros for more than 3 seconds, the app shows a red banner
-  that names the cause and the options.
-- Options for Spotify: use Spotify Connect, which is built into Sonos, Denon/Marantz (HEOS),
-  Yamaha (MusicCast), WiiM and many other speakers, or play the music from an app that allows
-  capture. Most local music players, podcast apps and many browsers allow it. AirBridge works with
-  every app that does not block capture.
-- HomePod does not support Spotify Connect (Apple TV does only through its own Spotify app). For
-  Spotify on AirPlay-only speakers there is no Android-side fix. The options are an iPhone/Mac, or
-  a small always-on computer running a Spotify Connect to AirPlay bridge such as SpotConnect
-  (spotraop) or owntone, which makes each AirPlay speaker appear as a Spotify Connect device.
+- **Most media apps can be captured, Spotify included,** whenever the app and the phone allow
+  Android playback capture. Android captures audio with usage `USAGE_MEDIA`, `USAGE_GAME` or
+  `USAGE_UNKNOWN` from apps that allow capture, which is the default for apps that target
+  Android 10 (API 29) or newer.
+- **An app can opt out.** An app, or a particular version of an app, can refuse capture with
+  `android:allowAudioPlaybackCapture="false"` in its manifest or with a capture policy
+  (`setAllowedCapturePolicy`). Android then gives every capture app, AirBridge included, digital
+  silence for that app's audio. Whether an app allows capture can change from one version of the
+  app to the next, so AirBridge does not keep a list of apps.
+- **AirBridge detects silent capture.** If Android reports that music is playing
+  (`AudioManager.isMusicActive`) but the captured audio has been exact zeros for more than 3
+  seconds, the app shows a red banner: the app that is playing (or this version of it) seems to
+  block Android's playback capture. It suggests checking that app's settings, trying another
+  player, or using Spotify Connect or Cast where the speaker supports it.
+- **AirBridge never requests audio focus** and never plays audio itself, so the app that is playing
+  is not paused or ducked when streaming starts. A unit test (`NoAudioFocusTest`) fails the build
+  if an audio-focus API or a local player appears in the app's code.
 
 ## 2. How it works, in plain English
 
@@ -43,7 +48,8 @@ What AirBridge does about it:
    is off.
 3. AirBridge reads the phone's audio mix 44,100 times per second (16-bit stereo), cuts it into
    352-sample packets (8 ms each), encodes each packet once, and sends a copy to every speaker
-   you turned on.
+   you turned on. On a phone that cannot capture at 44,100 Hz, AirBridge captures at 48,000 Hz and
+   converts the audio to 44,100 Hz first.
 4. Each speaker gets its own connection and thread. A slow or disconnected speaker cannot hold up
    the others. All speakers share one clock, so they play in step.
 5. Speakers play about 2 seconds behind the phone. That delay is the AirPlay network buffer. It
@@ -58,8 +64,9 @@ What AirBridge does about it:
  Other apps' playback (USAGE_MEDIA / GAME / UNKNOWN)
         |  AudioPlaybackCapture (MediaProjection consent, RECORD_AUDIO)
         v
- AudioCaptureService (foreground service: mediaProjection|mediaPlayback, WakeLock, Wi-Fi lock)
+ AudioCaptureService (foreground service: mediaProjection|mediaPlayback; WakeLock + Wi-Fi lock in a LockSet)
         |  CaptureEngine: AudioRecord 44.1 kHz / 16-bit / stereo, READ_BLOCKING
+        |  (CaptureFallback: 48 kHz when 44.1 kHz does not open; PcmResampler 48 -> 44.1 kHz)
         v
  capture thread --> PcmRingBuffer (lock-free SPSC, ~3 s) --> pump thread
                                                               | FrameChunker: 352 frames
@@ -75,7 +82,7 @@ What AirBridge does about it:
              RTSP/TCP + RTP/UDP     HAP pairing + encrypted RTSP + sealed RTP
 
  Discovery: NsdManager (_raop._tcp, _airplay._tcp) + raw mDNS legacy-unicast browser
-            -> ReceiverRegistry (merge by device id / IP) -> UI list (+ manual IP:port)
+            -> ReceiverRegistry (merge by device id / instance name / IP) -> UI list (+ manual IP:port)
 
  Multi-room: UI -> MainViewModel -> AirBridgeController -> MultiRoomController
             (on/off, groups, All on/off, volume + master, sync offset; saved in AppSettings)
@@ -86,7 +93,7 @@ Source layout (`app/src/main/java/com/airbridge/airplay/`):
 
 | Package | Contents |
 |---|---|
-| `audio/` | `AudioCaptureService`, `CaptureEngine`, `PcmRingBuffer`, `FrameChunker`, `LevelMeter`, `CaptureHealthMonitor`, `DriftCorrector` |
+| `audio/` | `AudioCaptureService`, `CaptureEngine`, `CaptureFallback`, `PcmResampler`, `PcmRingBuffer`, `FrameChunker`, `LevelMeter`, `CaptureHealthMonitor`, `DriftCorrector` |
 | `mdns/` | `DiscoveryManager` (NsdManager + MulticastLock), `RawMdnsBrowser`, `MdnsMessage` (DNS codec), `TxtRecord`, `AirPlayFeatures`, `AirPlayReceiver`, `ReceiverRegistry` |
 | `codec/` | `AlacEncoder`/`AlacDecoder`, `PcmL16`, `BinaryPlist` (bplist00), `Tlv8` |
 | `crypto/` | `SrpClient`/`SrpMath` (SRP-6a), `HapCrypto` (HKDF-SHA-512, ChaCha20-Poly1305, nonces), `X25519KeyPair`, `Ed25519KeyPair` |
@@ -96,6 +103,7 @@ Source layout (`app/src/main/java/com/airbridge/airplay/`):
 | `session/` | `AirPlaySessionManager`, `ReceiverSession`, `SenderFactory` |
 | `multiroom/` | `MultiRoomController` (speaker on/off, All on / All off, groups, per-speaker and master volume, sync offsets), `MasterVolumeCalculator`, `MasterVolumeDrag`, `SpeakerGroup`, `SpeakerGroupCodec`, `SpeakerGroups`, `SpeakerStore` |
 | `ui/` | Compose Material 3 screen, multi-room bar, dialogs, diagnostics sheet, theme, icons, `MainViewModel` |
+| `util/` | `AirLog`, `ByteUtil`, `NtpClock`, `LockSet` (balanced WakeLock, Wi-Fi lock and MulticastLock handling) |
 
 The protocol engine (`codec`, `crypto`, `airplay`, `session`, `multiroom`, most of `mdns` and
 `audio`) is plain JVM Kotlin with no Android imports, so it runs unchanged in the unit and loopback
@@ -106,6 +114,22 @@ tests.
 - **API:** `AudioPlaybackCaptureConfiguration` (Android 10, API 29) built from a `MediaProjection`,
   matching `USAGE_MEDIA`, `USAGE_GAME` and `USAGE_UNKNOWN`. Format: 44,100 Hz, `CHANNEL_IN_STEREO`,
   `ENCODING_PCM_16BIT`. AudioRecord buffer at least 4x the minimum and at least 250 ms.
+- **48 kHz fallback (v0.3.0):** `CaptureFallback` opens capture at 44,100 Hz first. If that
+  AudioRecord does not initialize, does not start recording, or has no valid buffer size (some
+  OEM audio builds accept only 48 kHz for playback capture), it is stopped and released, and
+  capture opens at 48,000 Hz stereo instead. A missing permission is not treated as a format
+  problem. The 48 kHz audio goes through `PcmResampler` on the capture thread before the ring
+  buffer, so the rest of the pipeline always sees 44.1 kHz. Diagnostics shows the format in use.
+- **PcmResampler:** pure Kotlin (no Android imports), exact rational conversion 44,100 / 48,000 =
+  147 / 160 with integer bookkeeping, so after T input frames exactly ceil((T - 80) x 147 / 160)
+  frames have come out, whatever the chunk sizes: no drift against the capture clock. Each output
+  frame is the input interpolated with a 160-tap Kaiser-windowed sinc (beta 10, cutoff 21 kHz) from
+  a table of 147 phases; each phase has unity DC gain times 0.9999, so full-scale sines do not
+  clip, and the rare overshoot (for example of a full-scale square wave) saturates instead of
+  wrapping. Channels are filtered separately; digital silence stays exact silence, so the
+  blocked-capture detector still works. Look-ahead 80 input frames (1.7 ms).
+- **No audio focus:** AirBridge never calls `requestAudioFocus` and never plays audio, so the app
+  that is playing keeps playing (`NoAudioFocusTest` guards this).
 - **Permissions:** `RECORD_AUDIO` is required by Android for any AudioRecord, including playback
   capture. AirBridge never opens the microphone. `POST_NOTIFICATIONS` is requested on Android 13+.
 - **Consent:** `MediaProjectionManager.createScreenCaptureIntent()`. On Android 14+ AirBridge passes
@@ -116,6 +140,18 @@ tests.
   and `FOREGROUND_SERVICE_MEDIA_PLAYBACK`. It calls `startForeground(..., MEDIA_PROJECTION |
   MEDIA_PLAYBACK)` **before** `getMediaProjection()`, uses the one-time consent token once, and
   registers a `MediaProjection.Callback` so a system-ended projection stops streaming cleanly.
+- **Lifecycle (v0.3.0):** each start creates fresh state. However streaming ends (Stop in the app or
+  the notification, `MediaProjection.Callback.onStop()` when Android ends capture on screen lock or
+  revocation, a capture error, a failed start, or the service being destroyed), one stop path runs
+  once and, in `finally` blocks, stops and releases the AudioRecord (also when `start()` failed
+  part-way), unregisters the projection callback, stops the projection, releases the WakeLock and
+  Wi-Fi lock and removes the foreground notification. A late `onStop` from a projection that an
+  earlier stop already ended is ignored. When capture fails to start, the error message stays on
+  screen (v0.2.0 could overwrite it with a plain "stopped").
+- **Locks:** the WakeLock (partial, 12 h safety timeout), the Wi-Fi lock (`FULL_HIGH_PERF`, or
+  `FULL_LOW_LATENCY` from Android 14) and discovery's MulticastLock are taken through `LockSet`:
+  if one lock cannot be taken, the ones already taken are released before the error is reported,
+  and a release that throws does not keep the others held.
 - **Pipeline:** capture thread (`THREAD_PRIORITY_URGENT_AUDIO`) writes into a lock-free
   single-producer/single-consumer ring buffer (power-of-two size, about 3 s, release stores via
   `lazySet`; overflow drops new samples and counts them). The pump thread cuts exact 352-frame
@@ -126,7 +162,8 @@ tests.
   and never overrun their 2 s buffer.
 - **Meter and blocked-capture detection:** per chunk RMS/peak in dBFS (about 15 UI updates per
   second). `CaptureHealthMonitor` reports `OK`, `NOTHING_PLAYING` (silence, no music active) or
-  `BLOCKED` (music active, all-zero PCM for more than 3 s; the Spotify case).
+  `BLOCKED` (music active, all-zero PCM for more than 3 s: the playing app, or this version of it,
+  opts out of capture).
 - **Teardown:** Stop (app or notification) stops AudioRecord, joins threads, stops the projection,
   releases the WakeLock and Wi-Fi lock, and sends TEARDOWN to every speaker off the main thread.
 
@@ -140,6 +177,8 @@ tests.
   PTR -> SRV/TXT -> A records, including name compression, and asks follow-up SRV/TXT/A questions
   when needed. It exists because some OEM NsdManager builds drop TXT records.
 - **MulticastLock** (`WifiManager.createMulticastLock`) is held while discovery runs (app visible).
+  It is taken through `LockSet` and released in a `finally` when discovery stops, even if stopping
+  NsdManager or the raw browser throws.
 - **TXT parsing:** raw RDATA (length-prefixed strings) or NsdManager attributes. Keys are case
   insensitive; the first occurrence wins. Fields used: `features`/`ft` (64-bit "0xLOW,0xHIGH"),
   `flags`/`sf` status flags, `am`/`model`, `manufacturer`, `pw`, `cn` (codecs), `et` (encryption
@@ -152,11 +191,29 @@ tests.
   keyed by IP is upgraded when the id appears. NSD "service lost" removes one advertisement; any
   discovered entry that is not refreshed for 5 minutes expires (raw mDNS has no "lost" event; the
   raw browser re-queries every 4 s). Manually added speakers do not expire.
+- **Address changes and re-announcements (v0.3.0):** a speaker that is announced again updates its
+  existing entry in place. It is matched by device id, or, when either side has no id, by the same
+  service type and instance name (DNS-SD instance names are unique on a network; compared without
+  regard to case), before the IP fallback. The entry keeps its key, which is the speaker id under
+  which volumes, sync offsets, protocol choices, group membership and AirPlay 2 pairings are saved,
+  so a new IP address or port adds no second card and loses no setting. A re-resolve without a TXT
+  record (some NsdManager builds) keeps the TXT record of the same advertisement. While streaming,
+  the speaker's session learns the new address: a session that is playing keeps its connection and
+  uses the new address the next time it connects; a session that is waiting to retry, or that has
+  failed, reconnects to the new address at once.
+- **When announcements are seen:** discovery runs only while AirBridge is open on screen
+  (`MainActivity.onStart` starts it, `onStop` stops it; streaming itself continues in the
+  foreground service), so AirBridge learns a new address only while it is open. If a speaker moves
+  while AirBridge is in the background or the screen is off, its session keeps trying the old
+  address (backoff 1, 2, 4, 8, 15 s, then it shows the error and waits for "Retry"); when AirBridge
+  is opened again, discovery sees the new address and the session reconnects there at once.
 - **Protocol choice (Auto):** AirPlay 2 when the `_airplay._tcp` service is present and feature bit
   38, 46 or 48 is set (pyatv's rule). Exception: Shairport-Sync (`model`/`am` contains
   "Shairport") uses AirPlay 1, because its AirPlay 2 mode only accepts PTP timing (see 7.6).
   Otherwise AirPlay 1. If AirPlay 2 fails for a non-auth reason and the speaker also offers
-  AirPlay 1, the session falls back automatically. Each speaker's menu can force AirPlay 2 or 1.
+  AirPlay 1, the session falls back automatically; the speaker card then shows
+  "AirPlay 1 (fallback)" and Diagnostics shows the AirPlay 2 error (v0.3.0). Each speaker's menu can
+  force AirPlay 2 or 1; a forced protocol is never labelled as a fallback.
 - **Manual entry:** IP literal + port (7000 default; 5000 on old units) + protocol (auto / AP2 /
   AP1) for speakers on another subnet or with blocked multicast.
 
@@ -259,8 +316,12 @@ length (at most 1024), ChaCha20-Poly1305 ciphertext, 16-byte tag; AAD = the leng
 3. `RECORD` (iOS and owntone send it between the two SETUPs).
 4. `SETUP` #2: `streams: [{type: 96 (realtime), ct: 2 (ALAC) or 1 (PCM), audioFormat: 0x40000
    (ALAC/44100/16/2) or 0x800 (PCM/44100/16/2), spf: 352, sr: 44100, latencyMin: 11025,
-   latencyMax: 88200, controlPort, shk: 32 bytes, audioMode: "default", isMedia: true,
+   latencyMax: 99225, controlPort, shk: 32 bytes, audioMode: "default", isMedia: true,
    supportsDynamicStreamID: false, streamConnectionID}]`. Reply: `dataPort`, `controlPort`.
+   The latency window is derived from the sync-packet latency (`SyncOffset.ap2LatencyBounds`,
+   section 8): owntone and pyatv send 11,025..88,200; v0.2.0 sent the same, which did not cover
+   positive sync offsets. v0.3.0 widens `latencyMax` to 99,225 so the whole -250..+250 ms range
+   fits.
    `shk` = first 32 bytes of the session secret (as owntone does). It works whether a receiver uses
    the `shk` it was sent or derives the key from the pairing.
 5. `SET_PARAMETER volume` last (owntone: some Sonos ignore volume sent earlier).
@@ -278,7 +339,7 @@ apps cannot bind ports below 1024 without root, so PTP is not possible. Conseque
 devices and most third-party receivers accept NTP timing for realtime streams (owntone and pyatv
 rely on this). Shairport-Sync in AirPlay 2 mode does not ("can not handle NTP streams"), so
 AirBridge uses its AirPlay 1 service. Any other receiver that rejects NTP falls back to AirPlay 1
-automatically when it advertises it.
+automatically when it advertises it, and its card shows "AirPlay 1 (fallback)".
 
 ## 8. Multi-speaker fan-out, volume, latency
 
@@ -296,8 +357,16 @@ automatically when it advertises it.
   one `SET_PARAMETER` per speaker is queued, and it carries the latest value. A change made while
   a speaker is still connecting is sent once the connection is up.
 - **Latency:** sync packets announce 77,175 frames plus the 0x07 flag. Receivers add their fixed
-  11,025 frames, so the total is 88,200 frames = 2.0 s. AirPlay 2 SETUP announces latencyMin 11,025
-  and latencyMax 88,200. A per-speaker sync offset shifts the announced latency (section 8.2).
+  11,025 frames, so the total is 88,200 frames = 2.0 s. A per-speaker sync offset shifts the
+  announced latency (section 8.2): -250..+250 ms gives 66,150..88,200 frames announced and
+  77,175..99,225 frames (1.75..2.25 s) in total. The AirPlay 2 stream SETUP declares latencyMin
+  11,025 and latencyMax 99,225 frames (v0.3.0; v0.2.0 declared latencyMax 88,200). A receiver may
+  compare either the announced latency or the total with that window (Shairport-Sync, for example,
+  adds its 11,025 frames and then clamps the total to the session's minimum and maximum latency),
+  so the window contains both for every offset: 11,025 <= 66,150 and 99,225 <= 99,225.
+  `SyncOffset.ap2LatencyBounds` computes the window from the base latency (owntone's and pyatv's
+  11,025..88,200, widened where needed), and `RtpStreamer` keeps every AirPlay 2 sync packet inside it as a safety
+  net (`SenderStats.latencyClamps` counts any correction; it stays 0 for the whole offset range).
   Speakers on different protocols may not be sample-aligned with each other; this needs a check
   on real hardware, and the sync offset is the tool to correct it by ear.
 - **Reconnect:** a failed connect retries with backoff (1, 2, 4, 8, 15 s, then waits for "Retry").
@@ -344,9 +413,13 @@ automatically when it advertises it.
   it is connected.
 - How to use it: if a speaker sounds ahead of the others, give it a positive offset (delay); if it
   lags, a negative one.
+- AirPlay 2 window: every sync packet for any offset in -250..+250 ms lies inside the stream
+  SETUP's latencyMin/latencyMax (11,025..99,225 frames), both as announced (66,150..88,200) and as
+  the total with the receiver's 11,025 frames (77,175..99,225). A strict mock receiver in the
+  loopback tests checks the first and every mid-stream sync packet at -250, 0 and +250 ms and
+  through a live sweep of every 5 ms step.
 - Not yet verified on hardware: how smoothly each receiver model re-aligns after a latency change
-  (some may skip or pause briefly), and how AirPlay 2 receivers treat a total delay above the
-  2.0 s `latencyMax` announced in the stream SETUP (up to 2.25 s with +250 ms).
+  (some may skip or pause briefly).
 
 ### 8.3 Saved speaker groups and All on / All off (v0.2.0)
 
@@ -374,27 +447,31 @@ automatically when it advertises it.
 
 - Hero card: status ("Ready" / "Streaming to 2 speakers"), a 28-segment live level meter
   (teal/amber/red) with peak hold, an active/enabled speaker count pill, and a Start/Stop button.
-- Red banner when capture is blocked, with the Spotify explanation.
+- Red banner when music is playing but the captured audio is silent: the app that is playing (or
+  this version of it) seems to block Android's playback capture; check that app's settings, try
+  another player, or use Spotify Connect or Cast where the speaker supports it.
 - Battery optimization card ("Keep streaming with the screen off" -> system prompt).
 - Multi-room bar above the speaker list (v0.2.0): the All on / All off chip, one chip per saved
   group (tap to play it, long-press to rename or delete, check mark when it matches) and
   "Save group". The chips wrap onto a second line instead of scrolling sideways.
 - Master volume card (v0.2.0), shown when at least one speaker is on: slider, percentage and the
   number of speakers it controls.
-- Speaker cards: name, model, IP, "AirPlay 2"/"AirPlay 1" badge, lock icon for PIN/password
-  speakers, a small sync-offset badge such as "+40 ms" when the offset is not 0, on/off switch,
+- Speaker cards: name, model, IP, "AirPlay 2"/"AirPlay 1" badge (amber "AirPlay 1 (fallback)" after
+  an automatic switch from AirPlay 2, v0.3.0), lock icon for PIN/password speakers, a small sync-offset badge such as "+40 ms" when the offset is not 0, on/off switch,
   status line with actions (Enter code / Enter password / Retry), volume slider, menu with
   Automatic / Force AirPlay 2 / Force AirPlay 1, Sync offset and Remove (manual speakers).
 - Dialogs: add by IP, 4-digit code, password, sync offset (slider -250..+250 ms in 5 ms steps, live
   label such as "+40 ms (delay)", "-25 ms (earlier)" or "0 ms", Reset and Done), save group, edit
-  group. Diagnostics sheet: capture state, help for Spotify, discovery, PIN/password, sync offset,
-  groups and battery, per-speaker packet/retransmit/drop counters and sync offset, recent log with
-  Copy.
+  group. Diagnostics sheet: capture state and format (44.1 kHz, or 48 kHz converted to 44.1 kHz),
+  help for silent capture, the AirPlay 1 fallback, discovery, PIN/password, sync offset, groups and
+  battery, per-speaker protocol, address, packet/retransmit/drop counters, sync offset and fallback
+  reason, recent log with Copy.
 - Rendered screenshots (JVM, Robolectric): [`01-ready.png`](../screenshots/01-ready.png),
   [`02-streaming.png`](../screenshots/02-streaming.png),
   [`03-capture-blocked.png`](../screenshots/03-capture-blocked.png),
   [`04-multi-room.png`](../screenshots/04-multi-room.png),
-  [`05-sync-offset.png`](../screenshots/05-sync-offset.png), plus the
+  [`05-sync-offset.png`](../screenshots/05-sync-offset.png),
+  [`06-airplay1-fallback.png`](../screenshots/06-airplay1-fallback.png), plus the
   [launcher](../screenshots/00-launcher-icon.png) and [status-bar](../screenshots/00-status-icon.png)
   icons, all in [`screenshots/`](../screenshots/).
 
@@ -423,7 +500,11 @@ automatically when it advertises it.
 | Sessions | AP1 + AP2 at once with identical timestamps and independent volumes; AP2 -> AP1 fallback; forced AP2 does not fall back; PIN prompt -> wrong code -> new code -> streaming; volume and sync-offset changes made while connecting reach the sender | loopback, JVM |
 | Multi-room logic (v0.2.0) | master volume scaling, drag snapshot round trip, all-zero, clamping, single speaker, derived master without feedback; sync offset ms -> frames for every 5 ms step from -250 to +250, clamping, snapping, latency floor, labels; group storage round trips (Unicode, quotes, pipes, commas, line breaks, empty names), damaged data, duplicates, CRUD rules, offline members, matching | JVM |
 | Multi-room live (v0.2.0) | AP1 and AP2 sync packets carry the shifted latency on connect and right after a live change (same session, audio bit-exact, no new SETUP/pairing/TEARDOWN); per-speaker offsets through the session manager; All on / All off connecting and disconnecting live speakers; a group applied mid-stream with an offline member; master volume drag on live speakers; offsets saved and reused on reconnect | loopback |
-| UI | Compose screen rendered to PNG (optional test), screen-state derivations (master display, All on/off label, group chips) | Robolectric, JVM |
+| AirPlay 2 latency window (v0.3.0) | the SETUP window 11,025..99,225 against every offset from -400 to +400 ms (clamped to ±250), announced and total; the v0.2.0 window shown to fail for positive offsets; any base latency; a strict mock AirPlay 2 receiver that checks the first and every mid-stream sync packet at -250, 0 and +250 ms and through a live sweep of every 5 ms step | JVM, loopback |
+| Capture (v0.3.0) | 48 kHz -> 44.1 kHz converter: exact 147/160 ratio and frame counts, sine level and SNR from 50 Hz to 19 kHz, stereo separation and channel swap, identical output for any chunk sizes, 60 s in random chunks still phase-locked, full-scale sines without clipping, saturation instead of wrap-around, exact silence and DC; 44.1 kHz first and 48 kHz fallback with the refused AudioRecord released; no audio focus or local playback anywhere in the app's code | JVM |
+| Locks and discovery (v0.3.0) | WakeLock/Wi-Fi lock/MulticastLock sets stay balanced on a failed acquire, a throwing release and repeated start/stop; a speaker that changes IP or port keeps one card and its id (device id or instance name), TXT kept on a TXT-less re-resolve, two speakers swapping addresses stay apart | JVM |
+| Address change and fallback label (v0.3.0) | a paired AirPlay 2 speaker that moves while streaming reconnects at its new address as soon as the new address is announced (the test delivers the announcement; on a phone that needs AirBridge open on screen), with its volume, sync offset and saved pairing (no new PIN); a playing speaker keeps its connection and uses the new address next time; "AirPlay 1 (fallback)" for an NTP-rejecting AirPlay 2 receiver, not for AirPlay 2 that works or a forced AirPlay 1; a replaced session's late status is ignored | loopback |
+| UI | Compose screen rendered to PNG (optional test), screen-state derivations (master display, All on/off label, group chips), capture wording (no blanket claims about any app) and capture format text | Robolectric, JVM |
 
 What tests cannot prove: that a specific Sonos/HomePod/Apple TV/AVR firmware accepts every detail
 (especially NTP timing for AirPlay 2), Android capture behaviour on each phone model, battery
@@ -434,7 +515,8 @@ section 13.
 
 | Item | Status |
 |---|---|
-| Spotify, some DRM apps | Capture blocked by the app; detected and explained; no workaround on unrooted Android |
+| Apps that opt out of capture | Playback capture works with Spotify and most media apps when the app and the phone allow it. An app, or one version of it, can opt out (`allowAudioPlaybackCapture="false"` or a capture policy); AirBridge then receives silence, detects it within about 3 s and explains it. AirBridge does not try to get around an opt-out |
+| 48 kHz-only capture | Handled since v0.3.0: capture falls back to 48 kHz and is converted to 44.1 kHz on the phone (a little CPU time on the capture thread); which phones need it is not yet known |
 | AirPlay 2 with NTP timing | Implemented per owntone/pyatv; per-device acceptance must be checked on real speakers. Fallback to AirPlay 1 is automatic when available |
 | PTP timing, buffered AAC (type 103), AirPlay video/mirroring, FairPlay | Not implemented (not possible without root, or not needed for music) |
 | HomePod/Apple TV set to "Only people sharing this home" | HomeKit access control is not supported. Set "Allow speaker access" to "Everyone on the same network" |
@@ -442,15 +524,18 @@ section 13.
 | Phone keeps playing locally | Android does not let capture apps silence the source. Lower the phone volume; on most phones the captured stream does not depend on it (check once) |
 | Screen lock | Some Android versions end a capture session when the phone locks; AirBridge then stops cleanly and says so |
 | Cross-protocol sync | AirPlay 1 and AirPlay 2 speakers in one room may be slightly offset; the per-speaker sync offset (up to 250 ms either way) can line them up by ear |
-| Sync offset on real receivers | Each receiver must re-align after a latency change; some may skip or pause briefly. AirPlay 2 receivers are told latencyMax 88,200 frames at SETUP, while a positive offset asks for up to 11,025 frames more. Not yet checked on hardware |
+| Sync offset on real receivers | Each receiver must re-align after a latency change; some may skip or pause briefly. Not yet checked on hardware. Since v0.3.0 the AirPlay 2 SETUP window (11,025..99,225 frames) contains every latency the sync packets carry for -250..+250 ms (v0.2.0 declared latencyMax 88,200, below the 99,225 total at +250 ms) |
+| Speaker gets a new address while AirBridge is in the background | Discovery runs only while AirBridge is open on screen. A speaker that moves while AirBridge is in the background or the screen is off is retried at its old address until its card shows an error; it reconnects after AirBridge is opened again (section 5) |
 | VPN apps, guest Wi-Fi, AP/client isolation | Can block discovery or streaming; turn off the VPN or use the main Wi-Fi |
 
 ## 13. Build plan (done) and on-device test plan (next)
 
 Done: protocol engine, Android capture service, discovery and UI (v0.1.0-debug); master volume,
-per-speaker sync offset, saved groups and All on / All off (v0.2.0-debug); 115 automated tests,
+per-speaker sync offset, saved groups and All on / All off (v0.2.0-debug); AirPlay 2 latency window
+fix, 48 kHz capture fallback, lifecycle and lock hardening, speaker address changes, the
+"AirPlay 1 (fallback)" label and corrected capture wording (v0.3.0-debug); 155 automated tests,
 lint clean, signed debug APK (`AirBridge-debug.apk`, published in the
-[v0.2.0-debug release](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.2.0-debug)).
+[v0.3.0-debug release](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.3.0-debug)).
 
 Next, on real phones and speakers:
 
@@ -459,13 +544,25 @@ Next, on real phones and speakers:
    app). Start streaming to one speaker at a time: Sonos, HomePod, Apple TV, AVR, AirPort/WiiM.
    Note for each: connects (Y/N), protocol shown, audio (Y/N), volume works, dropouts in 10 min.
 3. If an AirPlay 2 speaker shows "Playing" but stays silent, set it to "Force AirPlay 1" and
-   repeat. Report which ones needed it.
+   repeat. Report which ones needed it, and which ones showed "AirPlay 1 (fallback)" by themselves
+   (with the AirPlay 2 error from Diagnostics).
 4. Two and three speakers at once; check they are in step. If one is ahead or behind, set its
    sync offset while the music plays and note the value that lines it up and whether the change
-   was smooth.
+   was smooth. On AirPlay 2 speakers, also try -250 ms and +250 ms and check that the delay
+   changes audibly in both directions.
 5. Save two groups, switch between them while streaming, and use All on / All off and the master
    slider; check the speakers follow.
-6. Lock the screen for 10 minutes; confirm audio continues (or note the Android message).
-7. Start Spotify and confirm the blocked-capture banner appears within about 3 s.
-8. For any failure, copy the Diagnostics log (Copy button) and include it in the bug report (for
-   example a GitHub issue).
+6. Lock the screen for 10 minutes; confirm audio continues (or note the Android message). After
+   any stop, check that the notification is gone and the battery use of AirBridge drops (no lock
+   left held).
+7. Play from the apps you use (for example Spotify, YouTube Music, a podcast app, a browser) and note
+   for each app and app version whether the speakers play. If the silent-capture banner appears,
+   note the app and its version.
+8. Open Diagnostics and note the capture format: "44.1 kHz", or "48 kHz, converted to 44.1 kHz" on
+   phones that need the fallback (then listen for clicks or pitch errors).
+9. Change a speaker's IP address (for example renew its DHCP lease) while streaming and check that
+   it keeps one card, its volume and sync offset, and comes back without a new code. Do it once
+   with AirBridge open on screen (it should reconnect within seconds) and once with the screen off
+   (it should reconnect after AirBridge is opened again).
+10. For any failure, copy the Diagnostics log (Copy button) and include it in the bug report (for
+    example a GitHub issue).

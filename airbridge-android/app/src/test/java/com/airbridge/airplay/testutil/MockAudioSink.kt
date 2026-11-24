@@ -28,6 +28,9 @@ class MockAudioSink(
     /** Packet ordinal (0-based) to drop on first arrival and request again; -1 disables. */
     private val dropOrdinal: Int = 5,
 ) : Closeable {
+    /** Called for every sync packet as it arrives (a strict receiver checks it here). */
+    @Volatile var onSyncPacket: ((ByteArray) -> Unit)? = null
+
     data class Received(val seq: Int, val timestamp: Long, val marker: Boolean, val pcm: ShortArray, val retransmitted: Boolean)
 
     private val loopback = InetAddress.getLoopbackAddress()
@@ -121,7 +124,11 @@ class MockAudioSink(
             }
             val b1 = buf[1].toInt() and 0xFF
             when (b1) {
-                RtpPackets.BYTE1_SYNC -> syncPackets += buf.copyOf(p.length)
+                RtpPackets.BYTE1_SYNC -> {
+                    val sync = buf.copyOf(p.length)
+                    onSyncPacket?.invoke(sync)
+                    syncPackets += sync
+                }
                 RtpPackets.BYTE1_RETRANSMIT -> {
                     retransmitsReceived++
                     accept(buf.copyOfRange(4, p.length), retransmitted = true)

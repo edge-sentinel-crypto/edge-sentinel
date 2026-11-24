@@ -1,167 +1,184 @@
-# AirBridge: AirPlay sender for Android
+<img src="screenshots/00-launcher-icon.png" width="96" alt="AirBridge app icon">
 
-AirBridge is an Android app (Android 10 or newer) that captures the audio other apps are playing on
-the phone and streams it over local Wi-Fi to AirPlay 1 and AirPlay 2 speakers: Sonos, HomePod,
-Apple TV, Denon/Marantz/Yamaha receivers, WiiM, AirPort Express, Shairport-Sync and others. Several
-speakers can play at the same time, each with its own volume and sync offset, under one master
-volume, and saved speaker groups switch between sets of speakers with one tap.
+# AirBridge
 
-This `airbridge-android/` folder is a standalone project. It is not part of Edge Sentinel, shares no
-code with it and has its own Gradle build. It is licensed under the MIT License; see
-[LICENSE](LICENSE) in this folder.
+AirBridge is an Android app that streams the audio playing on your phone to AirPlay speakers over
+your local Wi-Fi. It is an AirPlay 1 (RAOP) and AirPlay 2 (HAP pairing) sender for Android 10 and
+newer, written in Kotlin with Jetpack Compose.
 
-> **Spotify does not work with AirBridge.** Android lets an app capture other apps' audio only
-> through the `AudioPlaybackCapture` API, and every app can refuse to be captured. Spotify refuses,
-> so Android gives every capture app, AirBridge included, digital silence while Spotify plays. No
-> app can get around this on an unrooted phone. AirBridge detects it: if Android reports that music
-> is playing but the captured audio has been all zeros for more than 3 seconds, the app shows a red
-> banner that explains the cause. For Spotify, use Spotify Connect, which is built into Sonos,
-> Denon/Marantz (HEOS), Yamaha (MusicCast), WiiM and many other speakers. AirBridge works with apps
-> that allow capture, such as most local music players, many podcast apps and many web browsers.
-> Details: [docs/PLAN.md, section 1](docs/PLAN.md#1-the-most-important-limitation-spotify).
+- **AirPlay 1 and AirPlay 2 in one app:** RAOP for older receivers, and AirPlay 2 with HomeKit
+  (HAP) pairing, including the on-screen code of an Apple TV and password-protected speakers.
+  Designed for Sonos, HomePod, Apple TV, Denon/Marantz/Yamaha receivers, WiiM, AirPort Express,
+  Shairport-Sync and other AirPlay receivers (not yet tested on real hardware; see
+  [Status and limitations](#status-and-limitations)). When AirPlay 2 does not connect and the
+  speaker also offers AirPlay 1, AirBridge switches to AirPlay 1 and the speaker card shows
+  **AirPlay 1 (fallback)** (new in v0.3.0).
+- **Multi-speaker:** play to several speakers at once, all on one shared clock. A slow or
+  disconnected speaker does not hold up the others.
+- **Per-speaker volume and a master volume:** each speaker has its own slider, and the master
+  slider moves every speaker that is on while keeping their balance (new in v0.2.0).
+- **Per-speaker sync offset (new in v0.2.0):** shift one speaker by up to 250 ms earlier or later,
+  in 5 ms steps, to line it up with the others. The change applies while the music plays, without
+  reconnecting. Since v0.3.0 the AirPlay 2 stream setup declares a latency window that covers the
+  whole -250 to +250 ms range.
+- **Saved speaker groups and All on / All off (new in v0.2.0):** save the speakers that are on as
+  a group such as "Downstairs", then tap the group to play exactly those speakers. One tap turns
+  every speaker on or off, also while streaming.
+- **Speakers that change address keep their settings (new in v0.3.0):** when a speaker comes back
+  with a new IP address, AirBridge updates its existing card instead of adding a second one, and
+  keeps its volume, sync offset, groups and pairing. AirBridge looks for speakers only while it is
+  open on screen, so that is when it sees a new address. A speaker that moves while AirBridge is in
+  the background or the screen is off reconnects after you open AirBridge again.
+- **100% local Wi-Fi:** the only network traffic is mDNS discovery and AirPlay to the speakers on
+  your network. No account, cloud service, analytics or ads.
 
-## Status
-
-- Version: debug build `v0.2.0-debug` (the app reports version name 0.2.0, version code 2). It
-  installs over the earlier `v0.1.0-debug` as an update: same package name, same signing key.
-- Tested: 115 automated unit and loopback integration tests pass on the JVM. The loopback tests run
-  complete AirPlay 1 and AirPlay 2 sessions over real network sockets against mock receivers,
-  including the v0.2.0 master volume, sync offset, groups and All on / All off with live mock
-  speakers. Android lint reports no issues. See [docs/BUILD-TEST-REPORT.md](docs/BUILD-TEST-REPORT.md).
-- Not tested yet: a real phone and real speakers. No phone, emulator or speaker was available for
-  the build, so acceptance by each speaker model (especially AirPlay 2 with NTP timing) and how
-  smoothly each model follows a sync-offset change still have to be checked on real hardware.
-
-## Features
-
-- **AirPlay 1 (RAOP):** ALAC or PCM audio, RSA/AES encryption where the receiver needs it, and
-  password (digest) authentication.
-- **AirPlay 2:** HomeKit (HAP) pairing: transient pairing with PIN `3939`, the 4-digit code shown on
-  an Apple TV, or a speaker password. Encrypted RTSP control channel, ChaCha20-Poly1305 encrypted
-  audio packets, NTP timing.
-- **Several speakers at once:** every speaker gets its own connection and thread, so a slow speaker
-  cannot hold up the others. All speakers share one clock. Each speaker has its own volume slider.
-- **Master volume (new in v0.2.0):** one slider moves every speaker that is on and keeps their
-  balance; dragging down and back up returns each speaker to where it was.
-- **Per-speaker sync offset (new in v0.2.0):** each speaker's menu has a Sync offset dialog,
-  -250 ms (earlier) to +250 ms (later) in 5 ms steps, with a Reset button. A small badge such as
-  "+40 ms" marks speakers with an offset. The change applies while the music plays, without
-  reconnecting.
-- **Saved groups and All on / All off (new in v0.2.0):** save the speakers that are on as a named
-  group, tap a group to play exactly its speakers (members that are offline are skipped), and
-  long-press a group to rename or delete it. One tap turns every speaker on or off, also while
-  streaming.
-- **Discovery:** mDNS/DNS-SD (`_raop._tcp` and `_airplay._tcp`) through Android's NsdManager plus a
-  built-in mDNS browser, and manual entry by IP address and port.
-- **Automatic protocol choice:** AirPlay 2 where the speaker supports it, otherwise AirPlay 1.
-  If AirPlay 2 fails for a reason other than authentication and the speaker also offers AirPlay 1,
-  AirBridge switches to AirPlay 1 automatically. Each speaker's menu can force either protocol.
-- **Runs in the background:** a foreground service with a notification and a Stop button keeps
-  streaming while the screen is off. Some Android versions end audio capture when the phone locks;
-  AirBridge then stops and says so.
-- **Local only:** the app sends network traffic only for discovery and to the speakers you choose.
-  It has no accounts, analytics, ads or crash reporting.
-
-Speakers play about 2 seconds behind the phone (the AirPlay network buffer); a sync offset moves one
-speaker between 1.75 and 2.25 seconds. That suits music, but not lip-sync with video.
+> [!NOTE]
+> **Which apps can be streamed.** AirBridge uses Android's standard `AudioPlaybackCapture` API
+> (Android 10 and newer): no root and no workarounds. Playback capture works with Spotify and most
+> other media apps whenever the app and the phone allow Android playback capture. Capture returns
+> silence only when a particular app, or a particular version of it, opts out of capture (for
+> example with `android:allowAudioPlaybackCapture="false"` in its manifest). If music is playing
+> but AirBridge receives only silence for about 3 seconds, it shows a banner: check that app's
+> settings, try another player, or use Spotify Connect or Cast where your speaker supports it.
+> AirBridge never requests audio focus, so the app that is playing keeps playing when streaming
+> starts.
 
 ## Screenshots
 
-The screenshots are rendered on the JVM with Robolectric from the app's real Compose UI, using
-sample speaker names and addresses from the 192.0.2.0/24 documentation range. They are not photos
-of a phone.
-
 | Ready | Streaming a saved group | Every speaker on |
-|---|---|---|
-| <img src="screenshots/01-ready.png" alt="AirBridge ready screen with group chips, the master volume and the speakers found on Wi-Fi" width="250"> | <img src="screenshots/02-streaming.png" alt="AirBridge streaming the Downstairs group to two speakers, with the master volume slider and a +40 ms sync offset badge" width="250"> | <img src="screenshots/04-multi-room.png" alt="Every speaker on: the All off toggle, the Everywhere group selected and a sync offset badge" width="250"> |
+|:---:|:---:|:---:|
+| <img src="screenshots/01-ready.png" width="250" alt="AirBridge ready to stream: group chips, master volume and the speakers found on Wi-Fi"> | <img src="screenshots/02-streaming.png" width="250" alt="AirBridge streaming the Downstairs group to two speakers, with the master volume slider and a +40 ms sync offset badge"> | <img src="screenshots/04-multi-room.png" width="250" alt="Every speaker on: the All off toggle, the Everywhere group selected and a sync offset badge"> |
 
-| Sync offset | Capture blocked (Spotify) |
-|---|---|
-| <img src="screenshots/05-sync-offset.png" alt="Sync offset dialog: slider from -250 ms to +250 ms, set to +40 ms (delay), with Reset and Done" width="250"> | <img src="screenshots/03-capture-blocked.png" alt="AirBridge red banner: Music is playing, but AirBridge hears silence" width="250"> |
+| Sync offset | Silent-capture warning | AirPlay 1 fallback |
+|:---:|:---:|:---:|
+| <img src="screenshots/05-sync-offset.png" width="250" alt="Sync offset dialog: slider from -250 ms to +250 ms, set to +40 ms (delay), with Reset and Done"> | <img src="screenshots/03-capture-blocked.png" width="250" alt="Red banner: music is playing, but AirBridge hears silence. The app that is playing, or this version of it, seems to block Android's playback capture; check that app's settings, try another player, or use Spotify Connect or Cast"> | <img src="screenshots/06-airplay1-fallback.png" width="250" alt="Streaming to three speakers: the Bedroom card shows an amber AirPlay 1 (fallback) badge and Playing, AirPlay 1 (fallback), because AirPlay 2 did not connect"> |
 
-App icons: [launcher icon](screenshots/00-launcher-icon.png),
-[status-bar icon](screenshots/00-status-icon.png).
+The screenshots are rendered from the real Compose UI with sample speakers and addresses from the
+192.0.2.0/24 documentation range (see [docs/BUILD-TEST-REPORT.md](docs/BUILD-TEST-REPORT.md)).
+The silent-capture warning shows what AirBridge displays when the playing app opts out of capture;
+the AirPlay 1 fallback screenshot shows a speaker that refused AirPlay 2.
 
-## Install the prebuilt APK
+## Quick install (Android phone)
 
-The standalone AirBridge repository is
-[github.com/edge-sentinel-crypto/airbridge-android](https://github.com/edge-sentinel-crypto/airbridge-android).
-The prebuilt debug APK is attached to its GitHub release
-[v0.2.0-debug](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.2.0-debug)
-as `AirBridge-debug.apk` (29,284,516 bytes). Direct download:
-<https://github.com/edge-sentinel-crypto/airbridge-android/releases/download/v0.2.0-debug/AirBridge-debug.apk>
+1. On your Android phone, open the
+   [v0.3.0-debug release](https://github.com/edge-sentinel-crypto/airbridge-android/releases/tag/v0.3.0-debug)
+   and download **`AirBridge-debug.apk`** (about 29 MB). Direct link:
+   <https://github.com/edge-sentinel-crypto/airbridge-android/releases/download/v0.3.0-debug/AirBridge-debug.apk>
+2. Open the downloaded file. When Android asks, allow installs from that source.
+3. Tap **Install** (or **Update**), then **Open**. Play Protect may warn about an unknown developer,
+   because this build is signed with the standard Android debug key, not a Play Store key; tap
+   **More details > Install anyway**.
+4. Turn on the speakers you want, start music in another app, and tap **Start streaming**.
 
-SHA-256 of `AirBridge-debug.apk`:
+Already have v0.1.0-debug or v0.2.0-debug? Install v0.3.0-debug over it; do not uninstall first. It
+has the same package name (`com.airbridge.airplay`) and the same signing key, and a higher version
+code (3), so Android updates the app in place and keeps your speakers, volumes, sync offsets,
+groups and pairings.
+
+SHA-256 of `AirBridge-debug.apk` (v0.3.0-debug, 29,333,668 bytes):
 
 ```
-d4f047de85ba79afa138434ab0897aa55f9828c3cf446b09ea9cceb76c3ee0e2
+6c10a385e5f222e86f4b5ed410b68d0837f013a45b7182422a9561ba6d3d5dc5
 ```
 
-Check the file before you install it: `sha256sum AirBridge-debug.apk` on Linux,
-`shasum -a 256 AirBridge-debug.apk` on macOS, or `Get-FileHash .\AirBridge-debug.apk -Algorithm SHA256`
-in Windows PowerShell. The APK is signed with a debug key, not a Play Store key, so Android and
-Google Play Protect warn about an unknown app; that warning is expected. If v0.1.0-debug is
-installed, installing this file updates it in place and keeps the saved speakers and pairings.
-
-Step-by-step install guide (copying the file to the phone or using ADB, permissions, Spotify and
+Full instructions (checking the hash, copying from a computer, ADB, first-run permissions,
 troubleshooting): [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Build from source
 
-Requirements: JDK 17 and the Android SDK with `platforms;android-35` and `build-tools;35.0.0`.
-Set `ANDROID_HOME` to the SDK folder, or create `local.properties` in this folder with
-`sdk.dir=<path to the SDK>` (Git ignores that file). The Gradle wrapper downloads Gradle 8.11.1 and
-checks it against the SHA-256 pinned in `gradle/wrapper/gradle-wrapper.properties`.
-
-Run every Gradle command from inside this `airbridge-android/` folder:
+Requirements: JDK 17 and the Android SDK with Platform 35 (`platforms;android-35`) and Build-Tools
+35.0.0. Set `JAVA_HOME`, and set `ANDROID_HOME` (or put `sdk.dir=<path to the SDK>` in
+`local.properties`).
 
 ```bash
-git clone --depth 1 https://github.com/edge-sentinel-crypto/edge-sentinel.git
-cd edge-sentinel/airbridge-android
-./gradlew testDebugUnitTest            # 115 unit and loopback tests
-./gradlew assembleDebug lintDebug      # APK: app/build/outputs/apk/debug/app-debug.apk
+git clone https://github.com/edge-sentinel-crypto/airbridge-android.git
+cd airbridge-android
+./gradlew testDebugUnitTest assembleDebug lintDebug
 ```
 
-On Windows, use `gradlew.bat` instead of `./gradlew`, or build in WSL on the Linux file system.
-A rebuilt APK is signed with your own debug key, so its SHA-256 differs from the released file.
-Toolchain setup without sudo, the optional UI screenshot test and APK checks are in
-[docs/INSTALL.md, section 7](docs/INSTALL.md#7-building-the-apk-from-source).
+- `testDebugUnitTest` runs 155 unit and loopback integration tests, including complete AirPlay 1 and
+  AirPlay 2 sessions against mock receivers over real sockets on 127.0.0.1, the multi-room features
+  (master volume, sync offset, groups, All on / All off) driving live mock speakers, and the v0.3.0
+  checks: a strict mock AirPlay 2 receiver that rejects any sync packet outside the latency window
+  of the stream setup, the 48 kHz to 44.1 kHz converter, the capture-rate fallback, lock handling,
+  speakers that change address, and the AirPlay 1 fallback label. Two interop tests use FFmpeg and
+  Python when they are installed and are skipped otherwise.
+- `assembleDebug` writes `app/build/outputs/apk/debug/app-debug.apk`. It is signed with your own
+  debug key, so its SHA-256 differs from the release APK.
+- `lintDebug` runs Android lint with `abortOnError = true`.
+
+The same sources are also published, file for file, in the `airbridge-android/` folder of
+[edge-sentinel-crypto/edge-sentinel](https://github.com/edge-sentinel-crypto/edge-sentinel). That
+folder is a standalone project: it shares no code with Edge Sentinel and has its own Gradle build,
+so run the Gradle commands from inside it.
+
+The build is tested on Linux (Ubuntu 24.04 under WSL2). Step-by-step toolchain setup on Linux or
+WSL, without sudo: [docs/INSTALL.md, section 7](docs/INSTALL.md#7-building-the-apk-from-source).
+On Windows, `gradlew.bat` replaces `./gradlew` (not tested).
+
+## How it works
+
+1. Android's AudioPlaybackCapture API gives AirBridge the audio other apps play, as 16-bit stereo.
+   AirBridge asks for 44.1 kHz, the AirPlay rate. If the phone cannot capture at 44.1 kHz, AirBridge
+   captures at 48 kHz and converts the audio to 44.1 kHz itself (new in v0.3.0). Android asks for
+   your consent each time you start streaming. AirBridge never uses the microphone, although Android
+   requires the `RECORD_AUDIO` permission for capture, and it never requests audio focus.
+2. A foreground service with a notification and a Stop button keeps streaming with the screen off.
+   (Some Android versions end capture when the phone locks; AirBridge then stops, releases the
+   capture and its wake and Wi-Fi locks, and says so.)
+3. Speakers are found with mDNS (`_raop._tcp` and `_airplay._tcp`) while AirBridge is open on
+   screen, or added by IP address.
+4. The audio is encoded once as ALAC (plain PCM for receivers that accept only PCM) and sent to
+   every selected speaker, each with its own connection and thread, on one shared timeline.
+5. Speakers play about 2 seconds behind the phone (the AirPlay network buffer), so AirBridge suits
+   music, not lip-sync with video.
+6. A speaker's sync offset changes only the delay AirBridge announces to that speaker in its RTP
+   sync packets: -250 ms plays it earlier, +250 ms later (1.75 to 2.25 s in total). For AirPlay 2
+   speakers the stream setup declares `latencyMin` 11,025 and `latencyMax` 99,225 frames
+   (0.25 to 2.25 s), so every offset in that range stays inside the declared window.
+
+Details: [docs/PLAN.md](docs/PLAN.md).
+
+## Status and limitations
+
+- **Not yet tested on real hardware.** The protocol engine is covered by the automated tests above,
+  but no real phone or speaker was used in this build. Whether each speaker model accepts the
+  AirPlay 2 session, and how each phone handles playback capture (including the 48 kHz fallback),
+  still needs checking on real devices.
+- **AirPlay 2 timing uses NTP, not PTP.** PTP needs UDP ports 319/320, which Android apps cannot
+  open without root. Receivers that reject NTP fall back to AirPlay 1 automatically when they offer
+  it; the speaker card then shows **AirPlay 1 (fallback)**, and each speaker's menu can force
+  AirPlay 1 or AirPlay 2.
+- **Sync offset and AirPlay 2.** v0.2.0 announced `latencyMax` 88,200 frames (2.0 s) at stream
+  setup while a positive offset asked for up to 2.25 s. v0.3.0 declares 11,025 to 99,225 frames,
+  which contains every latency the sync packets can carry for -250 to +250 ms, whether a receiver
+  checks the announced latency or the total including the 0.25 s it adds itself. Changing an
+  offset mid-stream sends a new sync packet at once; whether every receiver model re-aligns
+  smoothly (or skips briefly) still needs checking on real hardware.
+- **Debug build.** The APK reports versionName 0.3.0 (versionCode 3) and is published as release
+  `v0.3.0-debug`. (Earlier releases: `v0.2.0-debug` reported versionName 0.2.0 and versionCode 2;
+  `v0.1.0-debug` reported versionName 1.0.0 and versionCode 1.)
+- More in [docs/PLAN.md, section 12](docs/PLAN.md#12-limitations-and-risks).
 
 ## Documentation
 
-- [docs/PLAN.md](docs/PLAN.md): architecture, audio capture, discovery, the AirPlay 1 and
-  AirPlay 2 protocol engines, multi-speaker timing, master volume, sync offset and groups,
-  limitations and the on-device test plan.
-- [docs/INSTALL.md](docs/INSTALL.md): installing the APK on a phone, first run, everyday use,
-  troubleshooting and building from source.
-- [docs/BUILD-TEST-REPORT.md](docs/BUILD-TEST-REPORT.md): toolchain, test results, APK inspection
-  and what still needs real hardware.
+- [docs/PLAN.md](docs/PLAN.md): plan and architecture (capture, discovery, AirPlay 1 and 2 engines,
+  multi-speaker timing, master volume, sync offset, groups, privacy).
+- [docs/INSTALL.md](docs/INSTALL.md): installing, first run, everyday use, troubleshooting, building
+  from source.
+- [docs/BUILD-TEST-REPORT.md](docs/BUILD-TEST-REPORT.md): build and test report (155 tests, lint,
+  APK inspection, SHA-256 values).
 
-## Project layout
+## Acknowledgements
 
-```
-airbridge-android/
-├── app/                  Android app module (Kotlin, Jetpack Compose, Material 3)
-│   └── src/
-│       ├── main/         app code: audio capture, discovery, AirPlay 1/2 engines, multi-room, UI
-│       └── test/         unit and loopback integration tests, mock receivers
-├── docs/                 PLAN.md, INSTALL.md, BUILD-TEST-REPORT.md
-├── screenshots/          rendered UI screenshots and app icons
-├── gradle/               version catalog and Gradle wrapper
-├── build.gradle.kts, settings.gradle.kts, gradle.properties, gradlew, gradlew.bat
-├── LICENSE               MIT License
-└── README.md
-```
+Protocol details were checked against the source of owntone, pyatv and Shairport-Sync and against
+Apple's HomeKit ADK; see
+[docs/BUILD-TEST-REPORT.md, section 5](docs/BUILD-TEST-REPORT.md#5-independent-cross-checks-used-during-the-build).
 
 ## License
 
-AirBridge is licensed under the MIT License, copyright 2026 AirBridge Contributors; see
-[LICENSE](LICENSE). The proprietary Edge Sentinel license in the root of this repository covers
-Edge Sentinel; it does not apply to this folder. The Gradle wrapper files (`gradlew`, `gradlew.bat`
-and `gradle/wrapper/gradle-wrapper.jar`) come from Gradle and are licensed under the Apache License
-2.0, as stated in the headers of `gradlew` and `gradlew.bat`. Libraries such as AndroidX, Jetpack
-Compose and BouncyCastle are downloaded by Gradle at build time and keep their own licenses.
+MIT. See [LICENSE](LICENSE).
 
-AirPlay, HomePod and Apple TV are trademarks of Apple Inc. Spotify and Spotify Connect are
-trademarks of Spotify AB. Sonos is a trademark of Sonos, Inc. AirBridge is an independent project
-and is not affiliated with or endorsed by Apple, Spotify or Sonos.
+AirPlay, Apple TV and HomePod are trademarks of Apple Inc. Sonos and Spotify are trademarks of their
+owners. AirBridge is an independent project and is not affiliated with or endorsed by Apple, Sonos
+or Spotify.

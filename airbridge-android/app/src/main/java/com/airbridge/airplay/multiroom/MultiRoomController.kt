@@ -219,11 +219,19 @@ class MultiRoomController(
         registry.snapshot().filter { it.id in on }.forEach { connect(it) }
     }
 
-    /** Speakers that are switched on and appear (or re-appear) while streaming join automatically. */
+    /**
+     * Speakers that are switched on and appear (or re-appear) while streaming join automatically.
+     * A connected speaker that is announced again, for example from a new IP address, keeps its
+     * session, volume, sync offset and pairing; its session learns the new address (and retries
+     * there at once if its connection was lost).
+     */
     fun onReceiversChanged(list: List<AirPlayReceiver>) = synchronized(lock) {
         if (!sessions.isStreaming) return@synchronized
         val on = _selected.value
-        list.filter { it.id in on && !sessions.isConnected(it.id) }.forEach { connect(it) }
+        for (receiver in list) {
+            if (receiver.id !in on) continue
+            if (sessions.isConnected(receiver.id)) sessions.updateReceiver(receiver) else connect(receiver)
+        }
     }
 
     private fun connect(receiver: AirPlayReceiver) {

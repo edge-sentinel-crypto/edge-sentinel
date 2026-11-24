@@ -8,6 +8,13 @@ import kotlinx.coroutines.flow.asStateFlow
  * Merges DNS-SD results into one entry per physical receiver. Most receivers advertise both
  * `_raop._tcp` ("AABBCCDDEEFF@Kitchen") and `_airplay._tcp` ("Kitchen", TXT deviceid=AA:BB:..);
  * they are joined by device id, falling back to the IP address when no id is present.
+ *
+ * Re-announcements update the existing entry in place: a receiver that comes back with a new IP
+ * address or port (a new DHCP lease, a restart) is matched by its device id, or, when either side
+ * has no id, by the same service instance name (instance names are unique per service type on a
+ * network). The entry keeps its key, which is the speaker id that saved volumes, sync offsets,
+ * protocol choices, group membership and AirPlay 2 pairings are stored under, so a move neither
+ * adds a second speaker card nor loses those settings.
  */
 class ReceiverRegistry(private val now: () -> Long = System::currentTimeMillis) {
     private data class Entry(
@@ -19,6 +26,15 @@ class ReceiverRegistry(private val now: () -> Long = System::currentTimeMillis) 
         var lastSeen: Long = 0,
     )
 
+    /** Same service type and instance name (DNS names compare without regard to case). */
+    private fun Entry.advertises(service: DiscoveredService): Boolean {
+        val known = when (service.type) {
+            ServiceType.RAOP -> raop
+            ServiceType.AIRPLAY -> airplay
+        }
+        return known != null && known.instanceName.equals(service.instanceName, ignoreCase = true)
+    }
+
     private val entries = LinkedHashMap<String, Entry>()
     private val manual = LinkedHashMap<String, AirPlayReceiver>()
     private val _receivers = MutableStateFlow<List<AirPlayReceiver>>(emptyList())
@@ -28,6 +44,7 @@ class ReceiverRegistry(private val now: () -> Long = System::currentTimeMillis) 
     fun onServiceResolved(service: DiscoveredService) {
         val id = service.deviceId
         val existing = entries.values.firstOrNull { id != null && it.deviceId == id }
+            ?: entries.values.firstOrNull { (it.deviceId == null || id == null) && it.advertises(service) }
             ?: entries.values.firstOrNull { it.host == service.host && (it.deviceId == null || id == null) }
         val entry = existing ?: Entry(id ?: "host:${service.host}", id, service.host).also { entries[it.key] = it }
         if (entry.deviceId == null && id != null) {
@@ -38,9 +55,22 @@ class ReceiverRegistry(private val now: () -> Long = System::currentTimeMillis) 
             entries[id] = entry
         }
         entry.host = service.host
+        // Some NsdManager builds drop TXT records on a re-resolve: keep what the same
+        // advertisement already told us instead of forgetting the speaker's features.
+        val kept = when (service.type) {
+            ServiceType.RAOP -> entry.raop
+            ServiceType.AIRPLAY -> entry.airplay
+        }
+        val update = if (service.txt.isEmpty() && kept != null && kept.txt.isNotEmpty() &&
+            kept.instanceName.equals(service.instanceName, ignoreCase = true)
+        ) {
+            service.copy(txt = kept.txt)
+        } else {
+            service
+        }
         when (service.type) {
-            ServiceType.RAOP -> entry.raop = service
-            ServiceType.AIRPLAY -> entry.airplay = service
+            ServiceType.RAOP -> entry.raop = update
+            ServiceType.AIRPLAY -> entry.airplay = update
         }
         entry.lastSeen = now()
         publish()

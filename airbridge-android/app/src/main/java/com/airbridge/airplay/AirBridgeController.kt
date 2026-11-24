@@ -51,6 +51,10 @@ class AirBridgeController(app: Application) {
     private val _health = MutableStateFlow(CaptureHealthMonitor.Status.STARTING)
     val health: StateFlow<CaptureHealthMonitor.Status> = _health.asStateFlow()
 
+    /** Capture sample rate while streaming: 44,100, or 48,000 converted to 44,100; 0 when idle. */
+    private val _captureRate = MutableStateFlow(0)
+    val captureRate: StateFlow<Int> = _captureRate.asStateFlow()
+
     /** Speaker selection, volumes, master volume, sync offsets and groups (pure, unit-tested). */
     val multiRoom = MultiRoomController(settings, registry, sessions)
 
@@ -137,6 +141,7 @@ class AirBridgeController(app: Application) {
     fun onCaptureFailed(message: String) {
         AirLog.e(TAG, message)
         sessions.stop()
+        _captureRate.value = 0
         _stream.value = StreamUiState(StreamPhase.IDLE, message)
     }
 
@@ -145,7 +150,12 @@ class AirBridgeController(app: Application) {
         _stream.value = StreamUiState(StreamPhase.STOPPING)
         sessions.stop()
         _level.value = LevelMeter.Level(LevelMeter.SILENCE_DB, LevelMeter.SILENCE_DB, LevelMeter.SILENCE_DB)
+        _captureRate.value = 0
         _stream.value = StreamUiState(StreamPhase.IDLE, reason)
+    }
+
+    fun onCaptureFormat(sampleRate: Int) {
+        _captureRate.value = sampleRate
     }
 
     fun onLevel(level: LevelMeter.Level) {
@@ -155,7 +165,7 @@ class AirBridgeController(app: Application) {
     fun onCaptureHealth(status: CaptureHealthMonitor.Status) {
         _health.value = status
         if (status == CaptureHealthMonitor.Status.BLOCKED) {
-            AirLog.w(TAG, "music is playing but captured audio is silent: the playing app blocks capture")
+            AirLog.w(TAG, "music is playing but captured audio is silent: the playing app (or this version of it) seems to opt out of playback capture")
         }
     }
 

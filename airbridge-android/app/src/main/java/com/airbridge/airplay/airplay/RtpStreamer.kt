@@ -42,6 +42,12 @@ class RtpStreamer(
             field = SyncOffset.clamp(value)
         }
 
+    /**
+     * AirPlay 2 only: the latency window declared in the stream SETUP. Every sync packet's latency
+     * is kept inside it ([LatencyBounds.admits]); null for AirPlay 1, which declares no window.
+     */
+    @Volatile var latencyBounds: LatencyBounds? = null
+
     /** Latency (frames) announced in the most recent sync packet; 0 before the first one. */
     @Volatile var lastSyncLatencyFrames: Int = 0
         private set
@@ -121,14 +127,25 @@ class RtpStreamer(
     /**
      * Sends a sync packet once per second (immediately when [force] or after a flush). The packet
      * announces [baseLatencyFrames] shifted by [syncOffsetMs]: it says that the frame with RTP time
-     * `rtpNow - latency` is due at the current NTP time, so a larger latency plays later.
+     * `rtpNow - latency` is due at the current NTP time, so a larger latency plays later. With an
+     * AirPlay 2 window ([latencyBounds]) the latency stays inside what the SETUP declared; the
+     * window covers the whole -250..+250 ms range, so this never changes a value in practice
+     * (a change would be counted in [SenderStats.latencyClamps]).
      */
     @Synchronized
     fun maybeSendSync(timeline: StreamTimeline, baseLatencyFrames: Int, force: Boolean = false) {
         if (remoteControlPort == 0) return
         val nowNanos = clock.nowNanos()
         if (!force && !firstSync && nowNanos - lastSyncNanos < 1_000_000_000L) return
-        val latency = SyncOffset.latencyFrames(baseLatencyFrames, syncOffsetMs, timeline.sampleRate)
+        var latency = SyncOffset.latencyFrames(baseLatencyFrames, syncOffsetMs, timeline.sampleRate)
+        latencyBounds?.let { bounds ->
+            if (!bounds.admits(latency)) {
+                val inside = bounds.clamp(latency)
+                AirLog.w(TAG, "$label: latency $latency outside the SETUP window ${bounds.min}..${bounds.max}; using $inside")
+                stats.latencyClamps++
+                latency = inside
+            }
+        }
         val rtpNow = timeline.rtpAt(nowNanos)
         val pkt = RtpPackets.sync(firstSync, rtpNow - latency, NtpClock.toNtp64(nowNanos), rtpNow)
         controlSocket.send(DatagramPacket(pkt, pkt.size, remote, remoteControlPort))

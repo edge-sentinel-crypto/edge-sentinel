@@ -18,10 +18,15 @@ import java.util.concurrent.locks.LockSupport
 /**
  * System-audio capture pipeline:
  *
- *  AudioRecord (AudioPlaybackCapture: USAGE_MEDIA/GAME/UNKNOWN, 44.1 kHz, stereo, PCM16)
- *    -> capture thread -> lock-free ring buffer (about 3 s; 1.5 s requested, rounded up to a power of two)
+ *  AudioRecord (AudioPlaybackCapture: USAGE_MEDIA/GAME/UNKNOWN, stereo, PCM16; 44.1 kHz, or
+ *  48 kHz when the phone refuses 44.1 kHz)
+ *    -> capture thread (48 kHz only: PcmResampler to 44.1 kHz)
+ *    -> lock-free ring buffer (about 3 s; 1.5 s requested, rounded up to a power of two)
  *    -> pump thread -> 352-frame chunks -> drift correction -> level meter + blocked-capture
  *       detector -> AirPlaySessionManager.push() (ALAC encoded once, fanned out to speakers)
+ *
+ * AirBridge only records other apps' playback. It never plays audio itself and never requests
+ * audio focus, so the app that is playing (a music player, for example) keeps playing.
  */
 class CaptureEngine(
     private val context: Context,
@@ -34,6 +39,9 @@ class CaptureEngine(
         fun onLevel(level: LevelMeter.Level)
         fun onHealth(status: CaptureHealthMonitor.Status)
         fun onCaptureError(message: String)
+
+        /** The capture sample rate in use: 44,100, or 48,000 (converted to 44,100). */
+        fun onCaptureFormat(sampleRate: Int) {}
     }
 
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -47,37 +55,29 @@ class CaptureEngine(
     @Volatile private var pumpThread: Thread? = null
     @Volatile private var running = false
 
-    /** Creates the AudioRecord and starts both threads. Throws if capture cannot start. */
+    /** Sample rate of the running capture (0 before [start]). */
+    @Volatile var captureRate: Int = 0
+        private set
+
+    /**
+     * Opens playback capture (44.1 kHz first, 48 kHz as the fallback, see [CaptureFallback]) and
+     * starts both threads. Throws if capture cannot start at either rate.
+     */
     fun start() {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            throw SecurityException("RECORD_AUDIO permission is required for audio playback capture")
-        }
         val config = AudioPlaybackCaptureConfiguration.Builder(projection)
             .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
             .addMatchingUsage(AudioAttributes.USAGE_GAME)
             .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
             .build()
-        val format = AudioFormat.Builder()
-            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-            .setSampleRate(SAMPLE_RATE)
-            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-            .build()
-        val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-        val bufferBytes = maxOf(minBuffer * 4, SAMPLE_RATE * CHANNELS * 2 / 4) // >= 250 ms
-        val r = AudioRecord.Builder()
-            .setAudioFormat(format)
-            .setBufferSizeInBytes(bufferBytes)
-            .setAudioPlaybackCaptureConfig(config)
-            .build()
-        if (r.state != AudioRecord.STATE_INITIALIZED) {
-            r.release()
-            throw IllegalStateException("AudioRecord could not be initialized for playback capture")
-        }
+        val opened = CaptureFallback.openFirst { rate -> openRecord(config, rate) }
+        opened.refused.forEach { AirLog.w(TAG, "capture format refused: $it") }
+        val r = opened.handle
+        val resampler = if (opened.needsResampling) PcmResampler(opened.sampleRate, SAMPLE_RATE, CHANNELS) else null
         record = r
+        captureRate = opened.sampleRate
         running = true
-        r.startRecording()
         drift.start(clock.nowNanos())
-        captureThread = Thread({ captureLoop(r) }, "airbridge-capture").apply {
+        captureThread = Thread({ captureLoop(r, resampler) }, "airbridge-capture").apply {
             priority = Thread.MAX_PRIORITY
             start()
         }
@@ -85,16 +85,68 @@ class CaptureEngine(
             priority = Thread.MAX_PRIORITY - 1
             start()
         }
-        AirLog.i(TAG, "capture started (buffer $bufferBytes bytes, min $minBuffer)")
+        listener.onCaptureFormat(opened.sampleRate)
+        AirLog.i(
+            TAG,
+            "capture started at ${opened.sampleRate} Hz" + (if (resampler != null) ", converted to $SAMPLE_RATE Hz" else ""),
+        )
     }
 
-    private fun captureLoop(r: AudioRecord) {
+    /**
+     * Builds and starts a playback-capture AudioRecord at [sampleRate] (stereo, 16-bit). On any
+     * failure the AudioRecord is released before the exception leaves, so a refused rate leaks
+     * nothing and the next rate can be tried.
+     */
+    private fun openRecord(config: AudioPlaybackCaptureConfiguration, sampleRate: Int): AudioRecord {
+        // A missing permission is not a format problem: CaptureFallback rethrows it at once.
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            throw SecurityException("RECORD_AUDIO permission is required for audio playback capture")
+        }
+        val minBuffer = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+        if (minBuffer <= 0) throw IllegalStateException("no buffer size for this format (error $minBuffer)")
+        val bufferBytes = maxOf(minBuffer * 4, sampleRate * CHANNELS * 2 / 4) // >= 250 ms
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+            .setSampleRate(sampleRate)
+            .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
+            .build()
+        val r = AudioRecord.Builder()
+            .setAudioFormat(format)
+            .setBufferSizeInBytes(bufferBytes)
+            .setAudioPlaybackCaptureConfig(config)
+            .build()
+        var started = false
+        try {
+            if (r.state != AudioRecord.STATE_INITIALIZED) throw IllegalStateException("AudioRecord did not initialize")
+            r.startRecording()
+            if (r.recordingState != AudioRecord.RECORDSTATE_RECORDING) throw IllegalStateException("AudioRecord did not start recording")
+            started = true
+            AirLog.i(TAG, "AudioRecord open at $sampleRate Hz (buffer $bufferBytes bytes, min $minBuffer)")
+            return r
+        } finally {
+            if (!started) {
+                try {
+                    r.stop()
+                } catch (_: IllegalStateException) {
+                }
+                r.release()
+            }
+        }
+    }
+
+    private fun captureLoop(r: AudioRecord, resampler: PcmResampler?) {
         android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
         val buf = ShortArray(FRAMES_PER_CHUNK * CHANNELS * 4)
+        val converted = resampler?.let { ShortArray(it.maxOutputSamples(buf.size)) }
         while (running) {
             val n = r.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
             if (n > 0) {
-                ring.write(buf, 0, n)
+                if (resampler == null) {
+                    ring.write(buf, 0, n)
+                } else {
+                    val m = resampler.process(buf, 0, n - n % CHANNELS, converted!!, 0)
+                    if (m > 0) ring.write(converted, 0, m)
+                }
                 pumpThread?.let { LockSupport.unpark(it) }
             } else if (n < 0 && running) {
                 listener.onCaptureError("Audio capture stopped (error $n)")
@@ -143,23 +195,28 @@ class CaptureEngine(
         }
     }
 
+    /** Stops both threads and always releases the AudioRecord (idempotent). */
     fun stop() {
         running = false
         pumpThread?.let { LockSupport.unpark(it) }
+        val r = record
         try {
-            record?.stop()
-        } catch (_: IllegalStateException) {
+            try {
+                r?.stop()
+            } catch (_: IllegalStateException) {
+            }
+            captureThread?.join(1_000)
+            pumpThread?.join(1_000)
+        } finally {
+            r?.release()
+            record = null
+            AirLog.i(TAG, "capture stopped (dropped ${ring.droppedSamples} samples)")
         }
-        captureThread?.join(1_000)
-        pumpThread?.join(1_000)
-        record?.release()
-        record = null
-        AirLog.i(TAG, "capture stopped (dropped ${ring.droppedSamples} samples)")
     }
 
     companion object {
         private const val TAG = "Capture"
-        const val SAMPLE_RATE = 44_100
+        const val SAMPLE_RATE = CaptureFallback.AIRPLAY_RATE
         const val CHANNELS = 2
         const val FRAMES_PER_CHUNK = 352
     }
